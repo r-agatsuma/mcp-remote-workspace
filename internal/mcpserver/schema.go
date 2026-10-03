@@ -60,6 +60,8 @@ func createOutputSchema() *jsonschema.Schema {
 
 func execInputSchema() *jsonschema.Schema {
 	s := schemaFor[ExecInput]()
+	// Reflection permits null for slices; the v0 contract requires an array.
+	s.Properties["argv"].Type, s.Properties["argv"].Types = "array", nil
 	s.Properties["argv"].MinItems = pointer(1)
 	s.Properties["argv"].Items.MinLength = pointer(1)
 	s.Properties["cwd"].Default = json.RawMessage(`"."`)
@@ -71,6 +73,8 @@ func execInputSchema() *jsonschema.Schema {
 
 func changesOutputSchema() *jsonschema.Schema {
 	s := schemaFor[WorkspaceChangesOutput]()
+	// An empty manifest is [], never null.
+	s.Properties["changes"].Type, s.Properties["changes"].Types = "array", nil
 	s.Properties["changes"].Description = "Changes from the actual base_ref to current filesystem state, including local commits, staged, unstaged, and untracked files; sorted by path."
 	change := s.Properties["changes"].Items
 	change.If = &jsonschema.Schema{Properties: map[string]*jsonschema.Schema{"status": {Const: pointer(any(ChangeRenamed))}}, Required: []string{"status"}}
