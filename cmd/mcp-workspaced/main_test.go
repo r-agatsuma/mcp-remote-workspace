@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
@@ -13,6 +14,22 @@ import (
 )
 
 func TestStdioLifecycle(t *testing.T) {
+	// Exercise the binary startup without depending on a host Podman install.
+	dir := t.TempDir()
+	script := `#!/bin/sh
+test "$1" = --remote=false || exit 2
+test "$2" = --default-mounts-file=/dev/null || exit 3
+case "$3" in
+info) printf '%s\n' '{"host":{"security":{"rootless":true},"cgroupVersion":"v2"}}' ;;
+ps) exit 0 ;;
+create) printf 'simulated create failure\n' >&2; exit 42 ;;
+*) exit 4 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	binary := filepath.Join(t.TempDir(), "mcp-workspaced")

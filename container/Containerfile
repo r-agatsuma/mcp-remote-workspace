@@ -1,0 +1,11 @@
+FROM docker.io/library/debian:trixie-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git jq ripgrep patch build-essential python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /workspace \
+    && chmod 0755 /workspace
+
+WORKDIR /workspace
+CMD ["/usr/bin/sleep", "infinity"]

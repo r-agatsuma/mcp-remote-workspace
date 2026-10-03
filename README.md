@@ -4,9 +4,10 @@ A Go MCP service for disposable Linux development workspaces orchestrated by
 ChatGPT/OpenAI. The binary exposes **stdio only**, using the official
 `modelcontextprotocol/go-sdk`. It opens no network listener.
 
-The v0 tool contract is implemented and validated, but **all workspace backends
-are currently non-functional**. Valid requests return an MCP tool error with
-`isError: true` and structured content:
+`workspace_create` starts an empty workspace in one local rootless Podman
+container, and `workspace_destroy` removes it. Public Git bootstrap and the
+remaining tool backends are not implemented; those requests return an MCP tool
+error with `isError: true` and structured content:
 
 ```json
 {"error":{"code":"not_implemented","message":"workspace backend is not implemented"}}
@@ -17,7 +18,7 @@ return `invalid_path`. Public Git URLs with embedded credentials are rejected.
 
 | Tool | Purpose |
 | --- | --- |
-| `workspace_create` | Create an empty workspace (the default) or bootstrap public Git. |
+| `workspace_create` | Create an empty workspace (the default); public Git bootstrap is not implemented. |
 | `exec` | Run one process inside an existing workspace with explicit argv. |
 | `write_text` | Replace a complete UTF-8 text file. |
 | `read_text` | Read a complete UTF-8 text file without silent truncation. |
@@ -41,9 +42,47 @@ by path. Without an explicit `base_ref`, it uses the recorded source baseline or
 returns `base_ref_required`. Future filesystem backends must also reject effective
 symlink escapes and document a deterministic parent-directory creation policy.
 
-The intended production host is Debian 13 (Trixie) Minimal, with rootless Podman
-for workspaces and OpenAI Secure MCP Tunnel for connectivity. Those backends,
-tunnel setup, and Ansible deployment belong to separate issues.
+The intended production host is Debian 13 (Trixie) Minimal. Workspace lifecycle
+uses rootless Podman; OpenAI Secure MCP Tunnel setup and Ansible deployment
+belong to separate issues.
+
+The service requires local Podman 5.4 or newer, slirp4netns, subordinate UID/GID
+ranges for the service user, and cgroups v2 with CPU, memory and pids controllers
+delegated to that user. It checks Podman's rootless status and discovers managed
+containers before accepting MCP requests; initialization failure exits with a
+diagnostic on stderr. It never invokes sudo or connects to a remote Podman
+service. Build the project image as the same unprivileged user before starting:
+
+```sh
+podman --remote=false build --http-proxy=false \
+  -t localhost/mcp-remote-workspace:dev -f container/Containerfile container
+```
+
+The fixed development image includes ca-certificates, curl, git, jq, ripgrep,
+patch, build-essential and python3, and has a writable `/workspace` directory.
+Creation uses only this local image (`--pull=never`), with a fixed profile of
+2 CPUs, 1 GiB memory and 256 pids. It uses a private user namespace with UID 0
+inside, private PID/IPC namespaces, and slirp4netns for outbound networking.
+It drops all capabilities and enables no-new-privileges. No host directories,
+devices, engine sockets or credentials are passed into the container; automatic
+mounts from mounts.conf and host proxy environment forwarding are disabled.
+The effective container configuration is inspected before starting and on
+recovery; incompatible host defaults cause an error instead of weakening the
+profile. See the [Podman create documentation](https://docs.podman.io/en/v5.4.2/markdown/podman-create.1.html)
+for the runtime options.
+
+Creation returns a cryptographically random `ws_` handle, UTC `created_at`, and
+`source.type: "empty"`. The handle and timestamp are persisted in project-specific
+Podman labels (`io.github.r-agatsuma.mcp-remote-workspace.*`), so restarting the
+MCP service preserves existing workspaces. Shutdown leaves containers available
+for recovery. The service owns no workspace bind mounts or separate workspace
+files; removal deletes the container's writable layer and runtime metadata.
+Successful duplicate destroys are idempotent during one server lifetime.
+After restart, IDs of already removed workspaces, and other unknown IDs, return
+`workspace_not_found`. Podman operation failures return `backend_error`; a failed
+destroy keeps its mapping so a later request can try again. A failed inspection
+or start removes only the container created by that request; rollback failure
+reports the workspace handle and retains its mapping.
 
 This service is not a generic remote shell. Host process execution, GitHub
 authentication/commit/PR operations, private repository cloning, arbitrary runtime
@@ -65,4 +104,14 @@ and exits cleanly on stdin EOF, SIGINT, or SIGTERM.
 go test ./...
 go vet ./...
 gofmt -l cmd internal
+```
+
+Normal tests mock Podman commands and cover recovery, unknown IDs, duplicate
+destroy, isolation policy and command failures. On a prepared rootless Podman
+host with the image already built, run the opt-in integration test to verify
+actual creation, recovery, outbound HTTPS, writable storage, installed tools,
+host home/socket isolation and removal:
+
+```sh
+MCP_WORKSPACE_PODMAN_TEST=1 go test ./internal/workspace -run TestRootlessPodmanIntegration -v
 ```

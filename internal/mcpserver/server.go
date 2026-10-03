@@ -4,24 +4,56 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/r-agatsuma/mcp-remote-workspace/internal/workspace"
 )
 
-func New() *mcp.Server {
+type WorkspaceBackend interface {
+	Create(context.Context) (workspace.Workspace, error)
+	Destroy(context.Context, string) error
+}
+
+func New(backend WorkspaceBackend) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "mcp-workspaced", Version: "0.0.0"}, nil)
-	addStub[WorkspaceCreateInput](s, "workspace_create", "Create an isolated disposable development workspace, empty or from public Git; no credentials.", createInputSchema(), createOutputSchema(), validateCreate)
+	mcp.AddTool(s, &mcp.Tool{Name: "workspace_create", Description: "Create an isolated disposable empty development workspace; public Git bootstrap is not implemented. No credentials.", InputSchema: createInputSchema(), OutputSchema: createOutputSchema()}, func(ctx context.Context, req *mcp.CallToolRequest, in WorkspaceCreateInput) (*mcp.CallToolResult, any, error) {
+		if err := validateCreate(req, in); err != nil {
+			return errorResult(*err), nil, nil
+		}
+		if backend == nil || (in.Source != nil && in.Source.Type == SourcePublicGit) {
+			return errorResult(ToolError{ErrorNotImplemented, "workspace source backend is not implemented"}), nil, nil
+		}
+		w, err := backend.Create(ctx)
+		if err != nil {
+			return errorResult(ToolError{ErrorBackend, err.Error()}), nil, nil
+		}
+		return nil, WorkspaceCreateOutput{WorkspaceID: WorkspaceID(w.ID), CreatedAt: Timestamp(w.CreatedAt.UTC().Format(time.RFC3339Nano)), Source: SourceOutput{Type: SourceEmpty}}, nil
+	})
 	addStub[ExecInput](s, "exec", "Run one process inside an existing workspace. argv has no implicit shell expansion; cwd is workspace-relative. Backend time and output limits apply.", execInputSchema(), schemaFor[ExecOutput](), func(_ *mcp.CallToolRequest, in ExecInput) *ToolError { return validatePath(in.Cwd, false) })
 	addStub[WriteTextInput](s, "write_text", "Replace one complete UTF-8 text file at a workspace-relative path; no patch, append, or shell interpolation.", schemaFor[WriteTextInput](), schemaFor[WriteTextOutput](), validateWrite)
 	addStub[ReadTextInput](s, "read_text", "Retrieve one complete UTF-8 text file at a workspace-relative path. Oversized or non-UTF-8 files return errors; content is never silently truncated.", schemaFor[ReadTextInput](), schemaFor[ReadTextOutput](), func(_ *mcp.CallToolRequest, in ReadTextInput) *ToolError { return validatePath(in.Path, true) })
 	addStub[WorkspaceChangesInput](s, "workspace_changes", "List Git change metadata relative to base_ref or the recorded source baseline, including local commits, staged, unstaged, and untracked files. No file bodies; missing baseline requires base_ref.", schemaFor[WorkspaceChangesInput](), changesOutputSchema(), nil)
-	addStub[WorkspaceDestroyInput](s, "workspace_destroy", "Permanently remove one disposable workspace. Unknown IDs return workspace_not_found once the backend is implemented.", schemaFor[WorkspaceDestroyInput](), destroyOutputSchema(), nil)
+	mcp.AddTool(s, &mcp.Tool{Name: "workspace_destroy", Description: "Permanently remove one disposable workspace. Unknown IDs return workspace_not_found; repeated destroys succeed during this server lifetime.", InputSchema: schemaFor[WorkspaceDestroyInput](), OutputSchema: destroyOutputSchema()}, func(ctx context.Context, _ *mcp.CallToolRequest, in WorkspaceDestroyInput) (*mcp.CallToolResult, any, error) {
+		if backend == nil {
+			return errorResult(ToolError{ErrorNotImplemented, "workspace backend is not implemented"}), nil, nil
+		}
+		if err := backend.Destroy(ctx, string(in.WorkspaceID)); err != nil {
+			code := ErrorBackend
+			if errors.Is(err, workspace.ErrNotFound) {
+				code = ErrorWorkspaceNotFound
+			}
+			return errorResult(ToolError{code, err.Error()}), nil, nil
+		}
+		return nil, WorkspaceDestroyOutput{WorkspaceID: in.WorkspaceID, Destroyed: true}, nil
+	})
 	return s
 }
 

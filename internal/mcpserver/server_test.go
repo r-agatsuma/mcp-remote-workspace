@@ -13,14 +13,19 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/r-agatsuma/mcp-remote-workspace/internal/workspace"
 )
 
 func connect(t *testing.T) (context.Context, *mcp.ClientSession) {
+	return connectBackend(t, nil)
+}
+
+func connectBackend(t *testing.T, backend WorkspaceBackend) (context.Context, *mcp.ClientSession) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	server, err := New().Connect(ctx, serverTransport, nil)
+	server, err := New(backend).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +200,7 @@ func TestInvalidArguments(t *testing.T) {
 	// Reject fields that could otherwise expand the service's execution boundary.
 	for _, field := range []string{"image", "mount", "device", "capability", "network_mode", "podman_options", "shell"} {
 		cases = append(cases, struct{ name, args string }{"exec", `{"workspace_id":"ws","argv":["go"],"` + field + `":"unexpected"}`})
+		cases = append(cases, struct{ name, args string }{"workspace_create", `{"` + field + `":"unexpected"}`})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+tc.args, func(t *testing.T) {
@@ -204,6 +210,83 @@ func TestInvalidArguments(t *testing.T) {
 				t.Fatalf("error = %v, want MCP invalid params", err)
 			}
 		})
+	}
+}
+
+type lifecycleBackend struct {
+	created, destroyed int
+	err                error
+}
+
+func (b *lifecycleBackend) Create(context.Context) (workspace.Workspace, error) {
+	b.created++
+	return workspace.Workspace{ID: "ws_opaque", CreatedAt: time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)}, b.err
+}
+
+func (b *lifecycleBackend) Destroy(_ context.Context, id string) error {
+	b.destroyed++
+	if id != "ws_opaque" {
+		return workspace.ErrNotFound
+	}
+	return b.err
+}
+
+func TestWorkspaceLifecycleTools(t *testing.T) {
+	b := &lifecycleBackend{}
+	ctx, client := connectBackend(t, b)
+	for _, args := range []any{nil, map[string]any{}, map[string]any{"source": map[string]any{"type": "empty"}}} {
+		result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "workspace_create", Arguments: args})
+		if err != nil || result.IsError {
+			t.Fatalf("create: %#v, %v", result, err)
+		}
+		data, _ := json.Marshal(result.StructuredContent)
+		var out WorkspaceCreateOutput
+		if err := json.Unmarshal(data, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.WorkspaceID != "ws_opaque" || out.CreatedAt != "2026-10-04T00:00:00Z" || out.Source.Type != SourceEmpty {
+			t.Fatalf("create output: %#v", out)
+		}
+	}
+	if b.created != 3 {
+		t.Fatalf("create calls = %d", b.created)
+	}
+	result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "workspace_create", Arguments: map[string]any{"source": map[string]any{"type": "public_git", "url": "https://example.com/repo.git"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolError(t, result, ErrorNotImplemented)
+	if b.created != 3 {
+		t.Fatal("public Git request created a container")
+	}
+	result, err = client.CallTool(ctx, &mcp.CallToolParams{Name: "workspace_destroy", Arguments: map[string]any{"workspace_id": "ws_opaque"}})
+	if err != nil || result.IsError {
+		t.Fatalf("destroy: %#v, %v", result, err)
+	}
+	data, _ := json.Marshal(result.StructuredContent)
+	var out WorkspaceDestroyOutput
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.WorkspaceID != "ws_opaque" || !out.Destroyed || b.destroyed != 1 {
+		t.Fatalf("destroy output: %#v", out)
+	}
+	result, err = client.CallTool(ctx, &mcp.CallToolParams{Name: "workspace_destroy", Arguments: map[string]any{"workspace_id": "unknown"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolError(t, result, ErrorWorkspaceNotFound)
+	b.err = errors.New("Podman failed")
+	for _, name := range []string{"workspace_create", "workspace_destroy"} {
+		args := map[string]any{}
+		if name == "workspace_destroy" {
+			args["workspace_id"] = "ws_opaque"
+		}
+		result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertToolError(t, result, ErrorBackend)
 	}
 }
 
