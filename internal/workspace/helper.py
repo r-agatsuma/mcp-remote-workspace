@@ -1,5 +1,6 @@
 # Embedded in the daemon and executed only inside the selected container.
 # Requests are JSON on stdin, never interpolated into code or a shell command.
+import ctypes
 import errno
 import hashlib
 import json
@@ -109,11 +110,45 @@ def read_text(req):
     return result
 
 
-def kill_group(process):
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+def become_subreaper():
+    # Orphaned descendants must return to this helper, not the container's
+    # non-reaping PID 1. Set this before spawning anything and fail closed.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def terminate_descendants(process):
+    # Only signal our own children. Killing their parents adopts the next
+    # generation, even after setsid/double-fork, so repeat until ECHILD. Reaping
+    # each generation also prevents zombies accumulating under container PID 1.
+    while True:
+        children = []
+        # Use stat's PPid: task/*/children is absent on kernels built without
+        # CONFIG_CHECKPOINT_RESTORE. Unreaped direct children pin their PIDs,
+        # and this single-threaded helper is their only possible reaper.
+        for name in os.listdir('/proc'):
+            if not name.isdecimal():
+                continue
+            try:
+                with open('/proc/{}/stat'.format(name), 'rb') as stream:
+                    fields = stream.read().rsplit(b')', 1)[1].split()
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if int(fields[1]) == os.getpid():
+                children.append(int(name))
+        for pid in children:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            pid, status = os.waitpid(-1, 0)
+        except ChildProcessError:
+            return
+        if pid == process.pid:
+            process.returncode = os.waitstatus_to_exitcode(status)
 
 
 def execute(req):
@@ -124,6 +159,7 @@ def execute(req):
         os.close(cwd)
     env = os.environ.copy()
     env.update(req.get('env') or {})
+    become_subreaper()
     # shell=False is explicit; environment overrides apply only to this child.
     process = subprocess.Popen(req['argv'], shell=False, env=env,
                                stdin=subprocess.DEVNULL,
@@ -143,7 +179,7 @@ def execute(req):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     timed_out = True
-                    kill_group(process)
+                    terminate_descendants(process)
                     break
                 for key, _ in selector.select(min(remaining, 0.05)):
                     data = os.read(key.fileobj.fileno(), 65536)
@@ -155,8 +191,7 @@ def execute(req):
                     buffers[i].extend(data[:space])
                     truncated[i] |= len(data) > space
             if timed_out:
-                # Drain only a bounded amount after SIGKILL. Escaped descendants
-                # holding pipes cannot postpone the response indefinitely.
+                # Drain only a bounded amount after all descendants are reaped.
                 for key in list(selector.get_map().values()):
                     for _ in range(16):
                         try:
@@ -170,7 +205,7 @@ def execute(req):
                         buffers[i].extend(data[:space])
                         truncated[i] |= len(data) > space
     finally:
-        kill_group(process)
+        terminate_descendants(process)
         process.stdout.close()
         process.stderr.close()
         process.wait()

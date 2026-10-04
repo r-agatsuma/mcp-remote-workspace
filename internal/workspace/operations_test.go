@@ -144,18 +144,88 @@ func TestExecTimeoutKillsProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A killed child may remain a zombie until its init process reaps it.
-	status, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err == nil && !strings.HasPrefix(strings.SplitN(string(status), ") ", 2)[1], "Z ") {
-		t.Fatalf("timeout left running child: %s", status)
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
+	if _, err := os.Stat("/proc/" + strconv.Itoa(pid)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("timeout left a running or zombie child: %v", err)
 	}
 	// Closed output pipes must not disable the deadline.
 	out, err = m.Exec(context.Background(), id, ExecRequest{Timeout: 100 * time.Millisecond, Argv: []string{"bash", "-c", "exec 1>&- 2>&-; sleep 30"}})
 	if err != nil || !out.TimedOut {
 		t.Fatalf("closed-pipe timeout: %+v, %v", out, err)
+	}
+}
+
+func TestExecDescendantCleanup(t *testing.T) {
+	m, _, id := operationWorkspace(t, 0)
+	testExecDescendantCleanup(t, context.Background(), m, id)
+}
+
+// Run against both the embedded-helper test runner and the actual container.
+func testExecDescendantCleanup(t *testing.T, ctx context.Context, m *Manager, id string) {
+	t.Helper()
+	for _, mode := range []string{"group", "setsid", "double-fork", "closed-pipes", "normal-exit"} {
+		t.Run(mode, func(t *testing.T) {
+			// Repeated timeouts must leave neither running descendants nor zombies.
+			for iteration := 0; iteration < 3; iteration++ {
+				script := `import os, sys, time
+mode = sys.argv[1]
+with open('descendants.pid', 'w') as stream:
+    stream.write(str(os.getpid()) + '\n')
+pid = os.fork()
+if pid == 0:
+    if mode != 'group':
+        os.setsid()
+    with open('descendants.pid', 'a') as stream:
+        stream.write(str(os.getpid()) + '\n')
+    if mode == 'double-fork':
+        pid = os.fork()
+        if pid != 0:
+            os._exit(0)
+        with open('descendants.pid', 'a') as stream:
+            stream.write(str(os.getpid()) + '\n')
+    if mode in ('closed-pipes', 'normal-exit'):
+        os.close(1)
+        os.close(2)
+    time.sleep(30)
+if mode == 'double-fork':
+    os.waitpid(pid, 0)
+if mode == 'normal-exit':
+    while len(open('descendants.pid').read().split()) < 2:
+        time.sleep(0.001)
+    sys.exit(7)
+if mode == 'closed-pipes':
+    os.close(1)
+    os.close(2)
+time.sleep(30)
+`
+				start := time.Now()
+				out, err := m.Exec(ctx, id, ExecRequest{Argv: []string{"python3", "-c", script, mode}, Timeout: 300 * time.Millisecond})
+				if err != nil || time.Since(start) > 3*time.Second {
+					t.Fatalf("iteration %d: %+v, %v", iteration, out, err)
+				}
+				if mode == "normal-exit" {
+					if out.TimedOut || out.ExitCode == nil || *out.ExitCode != 7 {
+						t.Fatalf("normal exit: %+v", out)
+					}
+				} else if !out.TimedOut || out.ExitCode != nil {
+					t.Fatalf("timeout: %+v", out)
+				}
+				pids, err := m.ReadText(ctx, id, "descendants.pid")
+				want := 2
+				if mode == "double-fork" {
+					want = 3
+				}
+				if err != nil || len(strings.Fields(pids.Content)) != want {
+					t.Fatalf("descendant records: %+v, %v", pids, err)
+				}
+				// /proc entries persist for zombies too. Check in the same PID
+				// namespace as the operation, after the helper has returned.
+				check := "import os, sys; remaining = [pid for pid in sys.argv[1].split() if os.path.exists('/proc/' + pid)]; print(remaining); sys.exit(bool(remaining))"
+				out, err = m.Exec(ctx, id, ExecRequest{Argv: []string{"python3", "-c", check, pids.Content}})
+				if err != nil || out.ExitCode == nil || *out.ExitCode != 0 {
+					t.Fatalf("iteration %d left descendants (including zombies): %+v, %v", iteration, out, err)
+				}
+			}
+		})
 	}
 }
 

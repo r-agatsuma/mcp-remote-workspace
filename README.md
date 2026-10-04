@@ -43,9 +43,11 @@ requests on stdin and no implicit shell. It drains stdout and stderr separately,
 returns the exit code (including normal nonzero exits), and retains at most
 **256 KiB per stream** (`workspace.MaxStreamBytes`). Each stream has an explicit
 truncation flag. Invalid output UTF-8 is replaced, and the returned UTF-8 strings
-are bounded by the same byte limit. On timeout the helper sends SIGKILL to the
-process group, reaps the requested process, and returns `timed_out: true` with
-`exit_code: null` and captured output. Group cleanup also occurs on normal exit;
+are bounded by the same byte limit. The Linux helper becomes a child subreaper
+before launching the command. On timeout it sends SIGKILL to its children,
+repeatedly adopts and terminates orphaned descendants (including processes that
+use `setsid` or double-fork), and reaps them all before returning `timed_out: true`
+with `exit_code: null` and captured output. Cleanup also occurs on normal exit;
 commands should not leave background processes running. The deadline remains
 active when pipes close early or descendants keep pipes open. The host also
 bounds the serialized helper response and diagnostic buffers.
@@ -175,7 +177,8 @@ gofmt -l cmd internal
 
 Normal tests mock Podman and require no container host. Operation tests use
 Python 3 to run the embedded helper against temporary test directories, covering
-argv/environment behavior, UTF-8 round trips, timeout/process-group cleanup,
+argv/environment behavior, UTF-8 round trips, repeated timeout/descendant cleanup
+(including separate sessions, double-forks and zombie rejection),
 output truncation, size limits, traversal, symlinks, and special-file rejection.
 On a prepared dedicated
 rootless account with the fixed image already built, opt into the integration

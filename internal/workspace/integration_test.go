@@ -81,6 +81,9 @@ func TestRootlessPodmanIntegration(t *testing.T) {
 			t.Fatalf("cwd escape: %v", err)
 		}
 	})
+	t.Run("descendant cleanup", func(t *testing.T) {
+		testExecDescendantCleanup(t, ctx, m, w.ID)
+	})
 	// Test-only execution probes actual runtime behavior; it is not an MCP exec
 	// backend or a host shell. Resource files assert enforcement, not just flags.
 	probe := `import os, pathlib
