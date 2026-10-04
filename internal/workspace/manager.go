@@ -36,7 +36,9 @@ type Workspace struct {
 
 type entry struct {
 	Workspace
-	container string // Only set after inspecting matching ownership labels.
+	container      string // Only set after inspecting matching ownership labels.
+	needsReset     bool   // Recovered compute may contain an interrupted managed exec.
+	operationError error  // A failed process reset blocks further managed operations.
 }
 
 type Manager struct {
@@ -122,7 +124,7 @@ func NewWithOptions(ctx context.Context, runner Runner, options Options) (*Manag
 		if err := c.verify(m.imageID); err != nil {
 			return nil, fmt.Errorf("recovered workspace %s: %w", w.ID, err)
 		}
-		m.entries[w.ID] = &entry{Workspace: w, container: id}
+		m.entries[w.ID] = &entry{Workspace: w, container: id, needsReset: true}
 	}
 	return m, nil
 }

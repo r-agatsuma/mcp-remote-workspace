@@ -54,6 +54,7 @@ type containerInspection struct {
 	State         *struct {
 		Status  string
 		Running bool
+		Pid     *int
 	}
 	Config *struct {
 		Labels         map[string]string

@@ -137,10 +137,16 @@ func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 		// into the runtime spec at start (container_internal_linux.go).
 		c.HostConfig.UsernsMode = "private"
 		c.State.Status, c.State.Running = "running", true
+		c.State.Pid = new(int)
+		*c.State.Pid = 123
 		if !slices.ContainsFunc(c.Config.Env, func(value string) bool { return strings.HasPrefix(value, "HOSTNAME=") }) {
 			c.Config.Env = append(c.Config.Env, "HOSTNAME="+c.Config.Hostname)
 		}
 		return []byte(args[1]), nil
+	case "stop":
+		c := f.containers[args[len(args)-1]]
+		c.State.Status, c.State.Running, c.State.Pid = "exited", false, new(int)
+		return nil, nil
 	case "rm":
 		delete(f.containers, args[len(args)-1])
 		return nil, nil

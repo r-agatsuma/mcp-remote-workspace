@@ -169,7 +169,7 @@ func (m *Manager) ReadText(ctx context.Context, id, name string) (TextResult, er
 	return out, err
 }
 
-func (m *Manager) operation(ctx context.Context, id string, in helperRequest, timeout time.Duration, limit int64, out any) error {
+func (m *Manager) operation(ctx context.Context, id string, in helperRequest, timeout time.Duration, limit int64, out any) (operationErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[id]
@@ -179,23 +179,22 @@ func (m *Manager) operation(ctx context.Context, id string, in helperRequest, ti
 	if e.container == "" {
 		return errors.New("workspace container is unavailable")
 	}
+	if e.operationError != nil {
+		return e.operationError
+	}
 	// Reassert ownership, profile and running state before entering the container.
-	c, err := m.inspect(ctx, e.container)
+	c, err := m.inspectOperationContainer(ctx, e)
 	if err != nil {
-		return err
-	}
-	w, err := c.identity()
-	if err != nil {
-		return err
-	}
-	if w.ID != e.ID || !w.CreatedAt.Equal(e.CreatedAt) {
-		return errors.New("workspace ownership labels disagree")
-	}
-	if err := c.verify(m.imageID); err != nil {
 		return err
 	}
 	if c.State == nil || !c.State.Running {
 		return errors.New("workspace container is not running")
+	}
+	if e.needsReset {
+		if err := m.resetProcesses(e); err != nil {
+			return e.operationError
+		}
+		e.needsReset = false
 	}
 	runner, ok := m.runner.(inputRunner)
 	if !ok {
@@ -207,6 +206,16 @@ func (m *Manager) operation(ctx context.Context, id string, in helperRequest, ti
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if in.Operation == "exec" {
+		// The helper and its response are not a security boundary. Reset even
+		// after a valid success response; workspace code can kill/interfere with
+		// the helper or its channel. Hold the operation lock through cleanup.
+		defer func() {
+			if err := m.resetProcesses(e); err != nil {
+				operationErr = fmt.Errorf("workspace execution cleanup failed: %v; operation result: %v", err, operationErr)
+			}
+		}()
+	}
 	data, err = runner.RunInput(ctx, data, limit, "exec", "--interactive", "--workdir=/", e.container, "/usr/bin/python3", "-I", "-c", operationHelper)
 	if err != nil {
 		return err
@@ -233,4 +242,57 @@ func (m *Manager) operation(ctx context.Context, id string, in helperRequest, ti
 	default:
 		return errors.New("workspace operation failed")
 	}
+}
+
+// resetProcesses tears down the private PID namespace via the trusted host
+// runtime, which kills and reaps its remaining processes, including escaped
+// sessions, subreapers and zombies. Never remove/recreate the container: its
+// identity and writable layer must survive. Cancellation cannot skip cleanup.
+func (m *Manager) resetProcesses(e *entry) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	defer func() {
+		if err != nil {
+			e.operationError = fmt.Errorf("workspace process reset could not be verified; managed operations are blocked: %v", err)
+		}
+	}()
+	if _, err = m.runner.Run(ctx, "stop", "--time=0", e.container); err != nil {
+		return err
+	}
+	c, err := m.inspectOperationContainer(ctx, e)
+	if err != nil {
+		return err
+	}
+	if c.State == nil || c.State.Running || c.State.Pid == nil || *c.State.Pid != 0 || (c.State.Status != "exited" && c.State.Status != "stopped") {
+		return errors.New("workspace container stop was not confirmed")
+	}
+	if _, err = m.runner.Run(ctx, "start", e.container); err != nil {
+		return err
+	}
+	c, err = m.inspectOperationContainer(ctx, e)
+	if err != nil {
+		return err
+	}
+	if c.State == nil || !c.State.Running || c.State.Status != "running" || c.State.Pid == nil || *c.State.Pid <= 0 {
+		return errors.New("workspace container restart was not confirmed")
+	}
+	return nil
+}
+
+func (m *Manager) inspectOperationContainer(ctx context.Context, e *entry) (*containerInspection, error) {
+	c, err := m.inspect(ctx, e.container)
+	if err != nil {
+		return nil, err
+	}
+	w, err := c.identity()
+	if err != nil {
+		return nil, err
+	}
+	if w.ID != e.ID || !w.CreatedAt.Equal(e.CreatedAt) {
+		return nil, errors.New("workspace ownership labels disagree")
+	}
+	if err := c.verify(m.imageID); err != nil {
+		return nil, err
+	}
+	return c, nil
 }

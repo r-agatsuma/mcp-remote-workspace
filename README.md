@@ -52,6 +52,30 @@ commands should not leave background processes running. The deadline remains
 active when pipes close early or descendants keep pipes open. The host also
 bounds the serialized helper response and diagnostic buffers.
 
+`exec` is an ephemeral job API; persistent/background workloads are unsupported.
+The helper runs with the same identity as workspace code and **is not a security
+boundary**. Before every `exec` returns (success, timeout, cancellation, malformed
+response, or helper/transport failure), the host runs `podman stop --time=0`,
+verifies a terminal stopped state with no init PID, then starts and verifies the
+same container. This preserves workspace ID, labels, creation time, and the
+writable layer. Stopping the private PID namespace's init causes the kernel to
+kill its remaining processes, including daemonized descendants and zombies;
+see [Podman stop](https://docs.podman.io/en/latest/markdown/podman-stop.1.html) and
+[Linux PID namespaces](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
+Cleanup uses its own 45-second context even when the caller cancels. An
+unconfirmed stop or restart returns a backend error and blocks further managed
+operations on that workspace; cleanup commands are not retried automatically.
+After daemon recovery, the first operation on a running recovered workspace
+performs the same reset before entering the container.
+
+Managed operations (`exec`, `read_text`, `write_text`, and lifecycle operations)
+are serialized by the manager lock, including host cleanup. Thus no process
+from a previous managed execution can move/replace a parent directory during
+file I/O. The current lock also serializes different workspaces. Concurrent
+filesystem mutation by a trusted host/operator outside this managed path is
+outside the v0 threat model; pinned directory descriptors alone do not prevent
+such an operator from moving a directory outside `/workspace`.
+
 `write_text` encodes the supplied UTF-8 string directly to bytes, fsyncs a new
 temporary file in the target directory, and atomically replaces the target entry.
 Parent directories **must already exist**; create them explicitly with `exec` if
@@ -180,11 +204,15 @@ Python 3 to run the embedded helper against temporary test directories, covering
 argv/environment behavior, UTF-8 round trips, repeated timeout/descendant cleanup
 (including separate sessions, double-forks and zombie rejection),
 output truncation, size limits, traversal, symlinks, and special-file rejection.
+Mocked host tests cover reset ordering, cancellation, helper/response failures,
+blocked operations after failed cleanup, daemon recovery, and serialization
+through both execution and host cleanup.
 On a prepared dedicated
 rootless account with the fixed image already built, opt into the integration
 test (it creates and removes one test workspace, checks actual resource limits,
 writes/reads/executes a program, checks timeout/output/file limits and path
-security, probes isolation and outbound HTTPS, and tests rediscovery):
+security, tests helper SIGKILL/SIGSTOP and daemonized directory mutators,
+probes isolation and outbound HTTPS, and tests rediscovery):
 
 ```sh
 MCP_WORKSPACE_INTEGRATION=1 go test ./internal/workspace \

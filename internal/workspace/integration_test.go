@@ -84,6 +84,82 @@ func TestRootlessPodmanIntegration(t *testing.T) {
 	t.Run("descendant cleanup", func(t *testing.T) {
 		testExecDescendantCleanup(t, ctx, m, w.ID)
 	})
+	t.Run("helper interference fails closed", func(t *testing.T) {
+		for _, mode := range []string{"kill", "kill-closed-pipes", "stop"} {
+			t.Run(mode, func(t *testing.T) {
+				// Keep a daemonized mutator alive after disabling the helper.
+				// It also tries the directory-move race from the review. No
+				// mutator may remain when managed file operations resume.
+				script := `import os, signal, sys, time
+helper = os.getppid()
+namespace = os.readlink('/proc/self/ns/pid')
+open('execution.namespace', 'w').write(namespace)
+os.makedirs('race-dir', exist_ok=True)
+if os.fork() == 0:
+    os.setsid()
+    if os.fork() != 0:
+        os._exit(0)
+    os.close(1)
+    os.close(2)
+    open('mutator.progress', 'w').write('x')
+    open('mutator.ready', 'w').write('ready')
+    while True:
+        open('mutator.progress', 'a').write('x')
+        os.rename('race-dir', '/tmp/mcp-race-dir')
+        os.symlink('/tmp/mcp-race-dir', 'race-dir')
+        os.unlink('race-dir')
+        os.rename('/tmp/mcp-race-dir', 'race-dir')
+        time.sleep(0.005)
+while not os.path.exists('mutator.ready'):
+    time.sleep(0.001)
+if sys.argv[1] == 'kill-closed-pipes':
+    os.close(1)
+    os.close(2)
+os.kill(helper, signal.SIGSTOP if sys.argv[1] == 'stop' else signal.SIGKILL)
+time.sleep(30)
+`
+				if _, err := m.Exec(ctx, w.ID, ExecRequest{Argv: []string{"python3", "-c", script, mode}, Timeout: 100 * time.Millisecond}); err == nil {
+					t.Fatal("disabled helper returned successful execution")
+				}
+				c, err := m.inspectOperationContainer(ctx, m.entries[w.ID])
+				if err != nil || c.State == nil || !c.State.Running {
+					t.Fatalf("workspace identity/profile did not survive reset: %+v, %v", c, err)
+				}
+				// Direct trusted probe avoids changing the namespace a second
+				// time and detects zombies as well as running processes.
+				probe := `import os
+assert open('/workspace/execution.namespace').read() != os.readlink('/proc/self/ns/pid')
+remaining = [pid for pid in os.listdir('/proc') if pid.isdecimal() and int(pid) not in (1, os.getpid())]
+assert not remaining, remaining
+`
+				if _, err := p.Run(ctx, "exec", id, "/usr/bin/python3", "-I", "-c", probe); err != nil {
+					t.Fatalf("host reset left processes: %v", err)
+				}
+				before, err := m.ReadText(ctx, w.ID, "mutator.progress")
+				if err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(100 * time.Millisecond)
+				after, err := m.ReadText(ctx, w.ID, "mutator.progress")
+				if err != nil || after.SHA256 != before.SHA256 {
+					t.Fatalf("mutator persisted into file I/O: %+v, %v", after, err)
+				}
+				// Restore the stopped mutator's final directory state, then
+				// demonstrate that file I/O still uses the same writable layer.
+				out, err := m.Exec(ctx, w.ID, ExecRequest{Argv: []string{"python3", "-c", "import os; os.unlink('mutator.ready'); os.unlink('mutator.progress'); os.path.islink('race-dir') and os.unlink('race-dir'); os.path.exists('/tmp/mcp-race-dir') and os.rename('/tmp/mcp-race-dir', 'race-dir')"}})
+				if err != nil || out.ExitCode == nil || *out.ExitCode != 0 {
+					t.Fatalf("directory restoration: %+v, %v", out, err)
+				}
+				if _, err := m.WriteText(ctx, w.ID, "race-dir/new", "preserved"); err != nil {
+					t.Fatal(err)
+				}
+				read, err := m.ReadText(ctx, w.ID, "race-dir/new")
+				if err != nil || read.Content != "preserved" {
+					t.Fatalf("file I/O after interference: %+v, %v", read, err)
+				}
+			})
+		}
+	})
 	// Test-only execution probes actual runtime behavior; it is not an MCP exec
 	// backend or a host shell. Resource files assert enforcement, not just flags.
 	probe := `import os, pathlib

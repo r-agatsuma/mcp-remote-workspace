@@ -26,10 +26,14 @@ type helperPodman struct {
 	input    []byte
 	args     []string
 	response []byte
+	runInput func(context.Context, []byte, int64, ...string) ([]byte, error)
 }
 
 func (f *helperPodman) RunInput(ctx context.Context, input []byte, limit int64, args ...string) ([]byte, error) {
 	f.input, f.args = slices.Clone(input), slices.Clone(args)
+	if f.runInput != nil {
+		return f.runInput(ctx, input, limit, args...)
+	}
 	if f.response != nil {
 		return f.response, nil
 	}
@@ -168,20 +172,22 @@ func testExecDescendantCleanup(t *testing.T, ctx context.Context, m *Manager, id
 			for iteration := 0; iteration < 3; iteration++ {
 				script := `import os, sys, time
 mode = sys.argv[1]
+def record():
+    return str(os.getpid()) + '@' + os.readlink('/proc/self/ns/pid') + '\n'
 with open('descendants.pid', 'w') as stream:
-    stream.write(str(os.getpid()) + '\n')
+    stream.write(record())
 pid = os.fork()
 if pid == 0:
     if mode != 'group':
         os.setsid()
     with open('descendants.pid', 'a') as stream:
-        stream.write(str(os.getpid()) + '\n')
+        stream.write(record())
     if mode == 'double-fork':
         pid = os.fork()
         if pid != 0:
             os._exit(0)
         with open('descendants.pid', 'a') as stream:
-            stream.write(str(os.getpid()) + '\n')
+            stream.write(record())
     if mode in ('closed-pipes', 'normal-exit'):
         os.close(1)
         os.close(2)
@@ -217,9 +223,9 @@ time.sleep(30)
 				if err != nil || len(strings.Fields(pids.Content)) != want {
 					t.Fatalf("descendant records: %+v, %v", pids, err)
 				}
-				// /proc entries persist for zombies too. Check in the same PID
-				// namespace as the operation, after the helper has returned.
-				check := "import os, sys; remaining = [pid for pid in sys.argv[1].split() if os.path.exists('/proc/' + pid)]; print(remaining); sys.exit(bool(remaining))"
+				// /proc entries persist for zombies too. Compare namespaces as
+				// well, because host-side reset allows PID reuse in a new one.
+				check := "import os, sys; ns = os.readlink('/proc/self/ns/pid'); remaining = [record for record in sys.argv[1].split() if record.split('@')[1] == ns and os.path.exists('/proc/' + record.split('@')[0])]; print(remaining); sys.exit(bool(remaining))"
 				out, err = m.Exec(ctx, id, ExecRequest{Argv: []string{"python3", "-c", check, pids.Content}})
 				if err != nil || out.ExitCode == nil || *out.ExitCode != 0 {
 					t.Fatalf("iteration %d left descendants (including zombies): %+v, %v", iteration, out, err)
@@ -374,5 +380,212 @@ func TestUntrustedHelperOutputIsBoundedOnHost(t *testing.T) {
 	f.response = []byte(`{"result":{"content":"12345","size_bytes":5}}`)
 	if _, err := m.ReadText(context.Background(), id, "file"); !errors.Is(err, ErrSizeLimit) {
 		t.Fatalf("untrusted read: %v", err)
+	}
+}
+
+func TestExecAlwaysResetsProcesses(t *testing.T) {
+	for _, mode := range []string{"success", "timeout", "helper-killed", "transport-overflow", "invalid-json", "missing-result", "helper-error", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			m, f, id := operationWorkspace(t, 0)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f.runInput = func(_ context.Context, _ []byte, _ int64, _ ...string) ([]byte, error) {
+				switch mode {
+				case "success":
+					return []byte(`{"result":{"exit_code":7,"stdout":"out","stderr":"err"}}`), nil
+				case "timeout":
+					return []byte(`{"result":{"exit_code":null,"timed_out":true}}`), nil
+				case "helper-killed", "transport-overflow":
+					return nil, errors.New(mode)
+				case "invalid-json":
+					return []byte("broken response"), nil
+				case "missing-result":
+					return []byte(`{"result":null}`), nil
+				case "helper-error":
+					return []byte(`{"error":"backend_error"}`), nil
+				case "cancelled":
+					cancel()
+					return nil, ctx.Err()
+				default:
+					panic(mode)
+				}
+			}
+			before := len(f.calls)
+			out, err := m.Exec(ctx, id, ExecRequest{Argv: []string{"true"}})
+			if (err == nil) != (mode == "success" || mode == "timeout") {
+				t.Fatalf("result: %+v, %v", out, err)
+			}
+			if mode == "success" && (out.ExitCode == nil || *out.ExitCode != 7 || out.Stdout != "out" || out.Stderr != "err") {
+				t.Fatalf("reset lost execution result: %+v", out)
+			}
+			if mode == "timeout" && (!out.TimedOut || out.ExitCode != nil) {
+				t.Fatalf("reset lost timeout result: %+v", out)
+			}
+			want := [][]string{{"container", "inspect", m.entries[id].container}, {"stop", "--time=0", m.entries[id].container}, {"container", "inspect", m.entries[id].container}, {"start", m.entries[id].container}, {"container", "inspect", m.entries[id].container}}
+			calls := f.calls[before:]
+			if len(calls) != len(want) {
+				t.Fatalf("reset commands: %v", calls)
+			}
+			for i := range want {
+				if !slices.Equal(calls[i], want[i]) || f.contexts[before+i] != nil {
+					t.Fatalf("reset command/context %d: %v, %v", i, calls[i], f.contexts[before+i])
+				}
+			}
+			// Data and identity survive, and file I/O is available after reset.
+			f.runInput = nil
+			if _, err := m.WriteText(context.Background(), id, "preserved", "日本"); err != nil {
+				t.Fatal(err)
+			}
+			read, err := m.ReadText(context.Background(), id, "preserved")
+			if err != nil || read.Content != "日本" {
+				t.Fatalf("file I/O after reset: %+v, %v", read, err)
+			}
+		})
+	}
+}
+
+func TestFailedProcessResetBlocksOperations(t *testing.T) {
+	for _, mode := range []string{"stop", "stop-unconfirmed", "stop-pid", "stop-missing-pid", "stop-inspect", "start", "restart-inspect", "identity", "profile", "restart-unconfirmed"} {
+		t.Run(mode, func(t *testing.T) {
+			m, f, id := operationWorkspace(t, 0)
+			f.response = []byte(`{"result":{"exit_code":0}}`)
+			inspects := f.counts["container inspect"]
+			starts := f.counts["start"]
+			f.fail = func(ctx context.Context, key string, count int) error {
+				if ctx.Err() != nil {
+					t.Fatalf("reset used cancelled context: %v", ctx.Err())
+				}
+				if (mode == "stop" && key == "stop") || (mode == "start" && key == "start") || (mode == "stop-inspect" && key == "container inspect" && count == inspects+2) || (mode == "restart-inspect" && key == "container inspect" && count == inspects+3) {
+					return context.DeadlineExceeded
+				}
+				if key == "container inspect" && count == inspects+2 {
+					c := f.containers[m.entries[id].container]
+					switch mode {
+					case "stop-unconfirmed":
+						c.State.Running = true
+					case "stop-pid":
+						*c.State.Pid = 42
+					case "stop-missing-pid":
+						c.State.Pid = nil
+					case "identity":
+						c.Config.Labels[idLabel] = "ws_" + strings.Repeat("f", 64)
+					case "profile":
+						c.HostConfig.PidMode = "host"
+					}
+				}
+				if mode == "restart-unconfirmed" && key == "container inspect" && count == inspects+3 {
+					f.containers[m.entries[id].container].State.Running = false
+				}
+				return nil
+			}
+			if _, err := m.Exec(context.Background(), id, ExecRequest{Argv: []string{"true"}}); err == nil || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("unsafe cleanup must be a backend error: %v", err)
+			}
+			if mode != "start" && mode != "restart-inspect" && mode != "restart-unconfirmed" && f.counts["start"] != starts {
+				t.Fatal("restarted without confirmed cleanup")
+			}
+			calls := len(f.calls)
+			f.input = nil
+			for _, operation := range []func() error{
+				func() error {
+					_, err := m.Exec(context.Background(), id, ExecRequest{Argv: []string{"true"}})
+					return err
+				},
+				func() error { _, err := m.ReadText(context.Background(), id, "file"); return err },
+				func() error { _, err := m.WriteText(context.Background(), id, "file", "text"); return err },
+			} {
+				if err := operation(); err == nil || !strings.Contains(err.Error(), "blocked") {
+					t.Fatalf("operation was not blocked: %v", err)
+				}
+			}
+			if len(f.calls) != calls || f.input != nil {
+				t.Fatal("blocked operation entered container or retried cleanup")
+			}
+		})
+	}
+}
+
+func TestRecoveredWorkspaceResetsBeforeFileIO(t *testing.T) {
+	m, f, id := operationWorkspace(t, 0)
+	if _, err := m.WriteText(context.Background(), id, "file", "preserved"); err != nil {
+		t.Fatal(err)
+	}
+	w := m.entries[id].Workspace
+	recovered, err := New(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.runInput = func(_ context.Context, _ []byte, _ int64, _ ...string) ([]byte, error) {
+		if f.counts["stop"] != 1 || f.counts["start"] != 2 {
+			t.Fatal("recovered file I/O preceded process reset")
+		}
+		return []byte(`{"result":{"content":"preserved","size_bytes":9}}`), nil
+	}
+	if read, err := recovered.ReadText(context.Background(), id, "file"); err != nil || read.Content != "preserved" || recovered.entries[id].Workspace != w {
+		t.Fatalf("recovered read: %+v, %v", read, err)
+	}
+}
+
+func TestOperationsWaitForExecAndHostCleanup(t *testing.T) {
+	for _, operation := range []string{"exec", "read_text", "write_text"} {
+		t.Run(operation, func(t *testing.T) {
+			m, f, id := operationWorkspace(t, 0)
+			executing, releaseExec := make(chan struct{}), make(chan struct{})
+			cleaning, releaseCleanup := make(chan struct{}), make(chan struct{})
+			entered := make(chan struct{}, 1)
+			inputs := 0
+			f.runInput = func(_ context.Context, _ []byte, _ int64, _ ...string) ([]byte, error) {
+				inputs++
+				if inputs == 1 {
+					close(executing)
+					<-releaseExec
+				} else {
+					entered <- struct{}{}
+				}
+				return []byte(`{"result":{"exit_code":0}}`), nil
+			}
+			f.fail = func(_ context.Context, key string, count int) error {
+				if key == "stop" && count == 1 {
+					close(cleaning)
+					<-releaseCleanup
+				}
+				return nil
+			}
+			first := make(chan error, 1)
+			go func() { _, err := m.Exec(context.Background(), id, ExecRequest{Argv: []string{"true"}}); first <- err }()
+			<-executing
+			second := make(chan error, 1)
+			go func() {
+				var err error
+				switch operation {
+				case "exec":
+					_, err = m.Exec(context.Background(), id, ExecRequest{Argv: []string{"true"}})
+				case "read_text":
+					_, err = m.ReadText(context.Background(), id, "file")
+				case "write_text":
+					_, err = m.WriteText(context.Background(), id, "dir/new", "text")
+				}
+				second <- err
+			}()
+			assertWaiting := func() {
+				t.Helper()
+				select {
+				case <-entered:
+					t.Error("operation entered while exec or its cleanup was active")
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+			assertWaiting()
+			close(releaseExec)
+			<-cleaning
+			assertWaiting()
+			close(releaseCleanup)
+			if err := <-first; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-second; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
