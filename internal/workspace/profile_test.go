@@ -40,9 +40,19 @@ func TestProfileRejectsDriftAtCreateAndRecovery(t *testing.T) {
 		"unconfined seccomp": func(c *containerInspection) {
 			c.HostConfig.SecurityOpt = []string{"no-new-privileges", "seccomp=unconfined"}
 		},
-		"host PID":              func(c *containerInspection) { c.HostConfig.PidMode = "host" },
-		"shared IPC":            func(c *containerInspection) { c.HostConfig.IpcMode = "shareable" },
-		"host user namespace":   func(c *containerInspection) { c.HostConfig.UsernsMode = "" },
+		"host PID":             func(c *containerInspection) { c.HostConfig.PidMode = "host" },
+		"shared IPC":           func(c *containerInspection) { c.HostConfig.IpcMode = "shareable" },
+		"host user namespace":  func(c *containerInspection) { c.HostConfig.UsernsMode = "host" },
+		"missing ID mappings":  func(c *containerInspection) { c.HostConfig.IDMappings = nil },
+		"missing UID map":      func(c *containerInspection) { c.HostConfig.IDMappings.UIDMap = nil },
+		"missing GID map":      func(c *containerInspection) { c.HostConfig.IDMappings.GIDMap = nil },
+		"service UID mapped":   func(c *containerInspection) { c.HostConfig.IDMappings.UIDMap = []string{"0:0:65536"} },
+		"service GID mapped":   func(c *containerInspection) { c.HostConfig.IDMappings.GIDMap = []string{"0:0:65536"} },
+		"wrong namespace size": func(c *containerInspection) { c.HostConfig.IDMappings.UIDMap = []string{"0:1:65535"} },
+		"missing auto option":  func(c *containerInspection) { c.Config.CreateCommand = nil },
+		"conflicting userns": func(c *containerInspection) {
+			c.Config.CreateCommand = append(c.Config.CreateCommand, "--userns=host")
+		},
 		"host UTS":              func(c *containerInspection) { c.HostConfig.UTSMode = "host" },
 		"host cgroup namespace": func(c *containerInspection) { c.HostConfig.CgroupMode = "host" },
 		"host network":          func(c *containerInspection) { c.HostConfig.NetworkMode = "host" },
@@ -63,6 +73,8 @@ func TestProfileRejectsDriftAtCreateAndRecovery(t *testing.T) {
 		"NOTIFY_SOCKET environment": func(c *containerInspection) { c.Config.Env = append(c.Config.Env, "NOTIFY_SOCKET=/host/notify") },
 		"LISTEN_FDS environment":    func(c *containerInspection) { c.Config.Env = append(c.Config.Env, "LISTEN_FDS=3") },
 		"proxy environment":         func(c *containerInspection) { c.Config.Env = append(c.Config.Env, "HTTP_PROXY=http://host") },
+		"hostname override":         func(c *containerInspection) { c.Config.Hostname = "host-name" },
+		"HOSTNAME override":         func(c *containerInspection) { c.Config.Env = append(c.Config.Env, "HOSTNAME=host-name") },
 		"auto removal":              func(c *containerInspection) { c.HostConfig.AutoRemove = true },
 		"systemd mode":              func(c *containerInspection) { c.Config.SystemdMode = true },
 	}
@@ -109,6 +121,7 @@ func TestFixedCreationOptions(t *testing.T) {
 		"--network=slirp4netns:allow_host_loopback=false", "--http-proxy=false", "--read-only=false",
 		"--workdir=/workspace", "--image-volume=ignore", "--cpu-period=100000", "--cpu-quota=200000",
 		"--memory=2147483648", "--memory-swap=2147483648", "--pids-limit=256", "--sdnotify=ignore", "--unsetenv-all",
+		"--hostname=mcp-workspace", "--env=HOSTNAME=mcp-workspace",
 	} {
 		if !slices.Contains(args, option) {
 			t.Errorf("missing required option %s", option)
@@ -123,6 +136,95 @@ func TestFixedCreationOptions(t *testing.T) {
 	}
 	if args[len(args)-2] != testImageID || slices.Contains(args, Image) {
 		t.Fatal("create did not pin the local image ID")
+	}
+}
+
+func TestAutoUserNamespaceInspectionStates(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, mode string
+		running, valid     bool
+	}{
+		{"allocated before start", "created", "", false, true},
+		{"initialized runtime", "initialized", "private", false, true},
+		{"running runtime", "running", "private", true, true},
+		{"stopped runtime", "stopped", "private", false, true},
+		{"exited runtime", "exited", "private", false, true},
+		{"missing initialized namespace", "initialized", "", false, false},
+		{"missing running namespace", "running", "", true, false},
+		{"missing stopped namespace", "stopped", "", false, false},
+		{"missing exited namespace", "exited", "", false, false},
+		{"inconsistent running state", "created", "", true, false},
+		{"unknown state", "", "", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fixture()
+			c.State.Status, c.State.Running = tc.status, tc.running
+			c.HostConfig.UsernsMode = tc.mode
+			if err := c.verify(testImageID); (err == nil) != tc.valid {
+				t.Fatalf("profile valid=%v, error=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestAutoIDMappings(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mappings []string
+		valid    bool
+	}{
+		{"allocated", []string{"0:1:65536"}, true},
+		{"multiple ranges", []string{"0:100001:32768", "32768:1:32768"}, true},
+		{"missing", nil, false},
+		{"service account", []string{"0:0:65536"}, false},
+		{"malformed", []string{"0:1"}, false},
+		{"negative", []string{"0:-1:65536"}, false},
+		{"invalid number", []string{"0:x:65536"}, false},
+		{"zero size", []string{"0:1:0"}, false},
+		{"wrong size", []string{"0:1:65535"}, false},
+		{"excessive size", []string{"0:1:65537"}, false},
+		{"container gap", []string{"1:1:65536"}, false},
+		{"container overlap", []string{"0:1:32768", "0:100001:32768"}, false},
+		{"parent overlap", []string{"0:1:32768", "32768:32768:32768"}, false},
+		{"parent overflow", []string{"0:4294967295:65536"}, false},
+		{"integer overflow", []string{"0:4294967296:65536"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validAutoIDMap(tc.mappings); got != tc.valid {
+				t.Fatalf("valid=%v, want %v", got, tc.valid)
+			}
+		})
+	}
+}
+
+func TestStartedProfileDriftRollsBack(t *testing.T) {
+	for name, mutate := range map[string]func(*containerInspection){
+		"missing runtime user namespace": func(c *containerInspection) { c.HostConfig.UsernsMode = "" },
+		"changed hostname":               func(c *containerInspection) { c.Config.Hostname = "host-name" },
+		"unexpected HOSTNAME": func(c *containerInspection) {
+			c.Config.Env = slices.DeleteFunc(c.Config.Env, func(v string) bool { return strings.HasPrefix(v, "HOSTNAME=") })
+			c.Config.Env = append(c.Config.Env, "HOSTNAME=host-name")
+		},
+		"unexpected host environment": func(c *containerInspection) { c.Config.Env = append(c.Config.Env, "NOTIFY_SOCKET=/host/socket") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFake()
+			m := openFake(t, f)
+			f.fail = func(_ context.Context, op string, count int) error {
+				if op == "container inspect" && count == 2 {
+					for _, c := range f.containers {
+						mutate(c)
+					}
+				}
+				return nil
+			}
+			if _, err := m.Create(context.Background()); err == nil {
+				t.Fatal("published a workspace with post-start profile drift")
+			}
+			if f.counts["start"] != 1 || f.counts["rm"] != 1 || len(f.containers) != 0 || len(m.entries) != 0 {
+				t.Fatal("started workspace was not rolled back")
+			}
+		})
 	}
 }
 

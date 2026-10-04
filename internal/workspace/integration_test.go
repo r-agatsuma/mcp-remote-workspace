@@ -46,6 +46,8 @@ status = dict(line.split(':', 1) for line in pathlib.Path('/proc/self/status').r
 assert int(status['CapEff'].strip(), 16) == 0
 assert int(status['CapBnd'].strip(), 16) == 0
 assert status['NoNewPrivs'].strip() == '1'
+assert os.environ['HOSTNAME'] == 'mcp-workspace'
+assert os.uname().nodename == 'mcp-workspace'
 for name in ('NOTIFY_SOCKET', 'LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES', 'SSH_AUTH_SOCK', 'GITHUB_TOKEN', 'OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY'):
     assert name not in os.environ, name
 for name in ('/root/.ssh', '/root/.codex', '/root/.config/containers/auth.json', '/run/podman/podman.sock', '/var/run/docker.sock', '/dev/sda', '/dev/kvm', '/dev/fuse'):

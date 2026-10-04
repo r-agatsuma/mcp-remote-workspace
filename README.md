@@ -93,10 +93,14 @@ account's home from the account database, the UID-derived runtime directory,
 the project config directory, and a UID-derived D-Bus address required by systemd
 cgroup management. Host `NOTIFY_SOCKET`, `LISTEN_*`, engine connection/socket,
 proxy, credential, loader, and session environment variables are not inherited.
-The container receives only fixed PATH, `HOME=/root`, and `LANG=C.UTF-8`;
+The container receives only fixed PATH, `HOME=/root`, `LANG=C.UTF-8`, and
+`HOSTNAME=mcp-workspace`, with the hostname also fixed to `mcp-workspace`;
 `--unsetenv-all`, disabled proxy forwarding, and `--sdnotify=ignore` enforce this.
-Post-create and recovery inspection assert the effective isolation and resource
-profile before returning success. The Debian host, prepared configuration, daemon,
+Post-create inspection verifies the saved auto user namespace option and allocated
+UID/GID mappings; Podman adds the effective private user namespace at start.
+Post-start and recovery inspection assert the isolation and resource profile,
+including the pre-runtime state of interrupted creations, before returning success.
+The Debian host, prepared configuration, daemon,
 local Podman, and the dedicated user's project-owned engine/storage configuration
 are trusted; container code and downloaded content are untrusted.
 

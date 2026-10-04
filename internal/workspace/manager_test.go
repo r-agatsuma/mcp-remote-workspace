@@ -17,17 +17,19 @@ const testImageID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 // such as /proc and /dev/shm are not user mounts in Podman's inspect API.
 const inspectionFixture = `{
  "Id":"", "Image":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
- "EffectiveCaps":[], "BoundingCaps":[], "Mounts":[], "State":{"Running":false},
+ "EffectiveCaps":[], "BoundingCaps":[], "Mounts":[], "State":{"Status":"created","Running":false},
  "Config":{
    "Labels":{}, "WorkingDir":"/workspace", "User":"0:0",
-   "Env":["HOME=/root","LANG=C.UTF-8","PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
+   "Hostname":"mcp-workspace", "CreateCommand":["/usr/bin/podman","create","--userns=auto:size=65536"],
+   "Env":["HOME=/root","LANG=C.UTF-8","PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","HOSTNAME=mcp-workspace"],
    "Entrypoint":["/usr/bin/sleep"], "Cmd":["infinity"],
    "sdNotifyMode":"ignore", "sdNotifySocket":"", "SystemdMode":false
  },
  "HostConfig":{
    "Privileged":false, "ReadonlyRootfs":false, "Binds":[], "Tmpfs":{}, "Devices":[], "CapAdd":[],
    "SecurityOpt":["no-new-privileges","seccomp=/usr/share/containers/seccomp.json"],
-   "PidMode":"private", "IpcMode":"private", "UTSMode":"private", "UsernsMode":"private",
+   "PidMode":"private", "IpcMode":"private", "UTSMode":"private", "UsernsMode":"",
+   "IDMappings":{"UidMap":["0:1:65536"],"GidMap":["0:1:65536"]},
    "CgroupMode":"private", "Cgroups":"default", "CgroupManager":"systemd", "NetworkMode":"slirp4netns",
    "PortBindings":{}, "CpuPeriod":100000, "CpuQuota":200000, "Memory":2147483648,
    "MemorySwap":2147483648, "PidsLimit":256, "RestartPolicy":{"Name":"no"}
@@ -104,6 +106,7 @@ func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 		if f.persist {
 			c := fixture()
 			c.ID = id
+			c.Config.CreateCommand = append([]string{"/usr/bin/podman"}, args...)
 			for _, arg := range args {
 				if label, ok := strings.CutPrefix(arg, "--label="); ok {
 					name, value, _ := strings.Cut(label, "=")
@@ -129,7 +132,14 @@ func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 		}
 		return marshal([]*containerInspection{c})
 	case "start":
-		f.containers[args[1]].State.Running = true
+		c := f.containers[args[1]]
+		// Podman 5.4 initializes the auto user namespace and injects HOSTNAME
+		// into the runtime spec at start (container_internal_linux.go).
+		c.HostConfig.UsernsMode = "private"
+		c.State.Status, c.State.Running = "running", true
+		if !slices.ContainsFunc(c.Config.Env, func(value string) bool { return strings.HasPrefix(value, "HOSTNAME=") }) {
+			c.Config.Env = append(c.Config.Env, "HOSTNAME="+c.Config.Hostname)
+		}
 		return []byte(args[1]), nil
 	case "rm":
 		delete(f.containers, args[len(args)-1])
@@ -168,6 +178,9 @@ func TestCreateDestroyAndRestart(t *testing.T) {
 	for id, c := range f.containers {
 		if w.ID == id || !c.State.Running || c.Config.Labels[idLabel] != w.ID || c.Config.Labels[createdLabel] != w.CreatedAt.Format(time.RFC3339Nano) {
 			t.Fatalf("unexpected container: %+v", c)
+		}
+		if c.HostConfig.UsernsMode != "private" || c.Config.Hostname != "mcp-workspace" || !slices.Contains(c.Config.Env, "HOSTNAME=mcp-workspace") {
+			t.Fatalf("unexpected started profile: %+v", c)
 		}
 	}
 	// New daemon receives the same opaque ID from labels, without touching compute.
@@ -211,6 +224,25 @@ func TestWorkspaceIDsAreUnique(t *testing.T) {
 			t.Fatalf("invalid or reused ID %s", w.ID)
 		}
 		seen[w.ID] = true
+	}
+}
+
+func TestRecoveryOfStoppedWorkspace(t *testing.T) {
+	f := newFake()
+	m := openFake(t, f)
+	w, err := m.Create(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.containers {
+		c.State.Status, c.State.Running = "exited", false
+	}
+	restarted := openFake(t, f)
+	if restarted.entries[w.ID] == nil || f.counts["start"] != 1 {
+		t.Fatal("stopped workspace was lost or restarted")
+	}
+	if err := restarted.Destroy(context.Background(), w.ID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -462,6 +494,11 @@ func TestRecoveryOfInterruptedTransaction(t *testing.T) {
 	var id string
 	for key := range m.entries {
 		id = key
+	}
+	for _, c := range f.containers {
+		if c.HostConfig.UsernsMode != "" || c.State.Status != "created" {
+			t.Fatal("fixture did not preserve the pre-runtime auto namespace state")
+		}
 	}
 	f.fail = nil
 	restarted := openFake(t, f)
