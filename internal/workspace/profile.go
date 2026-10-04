@@ -11,12 +11,14 @@ import (
 )
 
 const (
-	memoryBytes       int64 = 2 * 1024 * 1024 * 1024
-	cpuPeriod         int64 = 100000
-	cpuQuota          int64 = 200000
-	pidsLimit         int64 = 256
-	containerPath           = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-	containerHostname       = "mcp-workspace"
+	memoryBytes          int64 = 2 * 1024 * 1024 * 1024
+	cpuPeriod            int64 = 100000
+	cpuQuota             int64 = 200000
+	pidsLimit            int64 = 256
+	containerPath              = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	containerHostname          = "mcp-workspace"
+	controlHostPath            = "/usr/local/lib/mcp-workspaced/mcp-control"
+	controlContainerPath       = "/run/mcp-control"
 )
 
 func createArgs(w Workspace, image string) []string {
@@ -33,13 +35,15 @@ func createArgs(w Workspace, image string) []string {
 		"--userns=auto:size=65536", "--user=0:0",
 		"--network=slirp4netns:allow_host_loopback=false", "--http-proxy=false",
 		"--read-only=false", "--image-volume=ignore", "--workdir=/workspace",
+		"--mount=type=bind,source=" + controlHostPath + ",destination=" + controlContainerPath + ",ro=true",
+		"--mount=type=volume,source=" + volumeName(w.ID) + ",destination=/workspace",
 		"--cgroups=enabled", "--cpu-period=100000", "--cpu-quota=200000",
 		"--memory=2147483648", "--memory-swap=2147483648", "--pids-limit=256",
 		"--sdnotify=ignore", "--systemd=false", "--init=false", "--restart=no",
 		"--log-driver=k8s-file", "--log-opt=max-size=1048576", "--stop-timeout=0",
 		"--hostname=" + containerHostname,
 		"--unsetenv-all", "--env=" + containerPath, "--env=HOME=/root", "--env=LANG=C.UTF-8", "--env=HOSTNAME=" + containerHostname,
-		"--entrypoint=/usr/bin/sleep", image, "infinity",
+		"--entrypoint=" + controlContainerPath, image, "init",
 	}
 }
 
@@ -105,7 +109,10 @@ func (c *containerInspection) identity() (Workspace, error) {
 	if c.Config == nil {
 		return Workspace{}, errors.New("missing workspace configuration")
 	}
-	l := c.Config.Labels
+	return identityFromLabels(c.Config.Labels)
+}
+
+func identityFromLabels(l map[string]string) (Workspace, error) {
 	if l[managedLabel] != "true" || l[profileLabel] != profileVersion || !workspaceIDPattern.MatchString(l[idLabel]) {
 		return Workspace{}, errors.New("invalid workspace ownership labels")
 	}
@@ -130,7 +137,7 @@ func (c *containerInspection) verify(image string) error {
 		{"writable /workspace", config.WorkingDir == "/workspace" && h.ReadonlyRootfs != nil && !*h.ReadonlyRootfs},
 		{"unprivileged", h.Privileged != nil && !*h.Privileged},
 		{"no capabilities", len(c.EffectiveCaps) == 0 && len(c.BoundingCaps) == 0 && len(h.CapAdd) == 0},
-		{"no mounts or devices", len(c.Mounts) == 0 && len(h.Binds) == 0 && len(h.Tmpfs) == 0 && len(h.Devices) == 0 && len(config.Secrets) == 0},
+		{"service mounts only", c.verifyMounts() && len(h.Tmpfs) == 0 && len(h.Devices) == 0 && len(config.Secrets) == 0},
 		{"security options", slices.Equal(h.SecurityOpt, []string{"no-new-privileges", "seccomp=/usr/share/containers/seccomp.json"})},
 		{"private namespaces", h.PidMode == "private" && h.IpcMode == "private" && h.UTSMode == "private" && h.CgroupMode == "private"},
 		{"private auto user namespace", c.verifyUserNamespace()},
@@ -138,7 +145,7 @@ func (c *containerInspection) verify(image string) error {
 		{"outbound network", h.NetworkMode == "slirp4netns" && len(h.PortBindings) == 0},
 		{"resource limits", h.Cgroups == "default" && h.CgroupManager == "systemd" && h.CpuPeriod == cpuPeriod && h.CpuQuota == cpuQuota && h.Memory == memoryBytes && h.MemorySwap == memoryBytes && h.PidsLimit == pidsLimit},
 		{"container user", config.User == "0:0"},
-		{"container process", slices.Equal(config.Entrypoint, []string{"/usr/bin/sleep"}) && slices.Equal(config.Cmd, []string{"infinity"})},
+		{"container process", slices.Equal(config.Entrypoint, []string{controlContainerPath}) && slices.Equal(config.Cmd, []string{"init"})},
 		{"disposable runtime", !h.AutoRemove && !h.Init && h.RestartPolicy.Name == "no" && !config.SystemdMode},
 		{"sd-notify disabled", config.SdNotifyMode == "ignore" && config.SdNotifySocket == ""},
 	}
@@ -158,6 +165,56 @@ func (c *containerInspection) verify(image string) error {
 		return errors.New("workspace profile assertion failed: container environment")
 	}
 	return nil
+}
+
+func (c *containerInspection) verifyMounts() bool {
+	if len(c.Mounts) != 2 {
+		return false
+	}
+	seen := map[string]bool{}
+	workspaceSource := ""
+	for _, raw := range c.Mounts {
+		var mount struct {
+			Type, Source, Destination, Name string
+			RW                              *bool
+		}
+		if json.Unmarshal(raw, &mount) != nil || seen[mount.Destination] || mount.RW == nil {
+			return false
+		}
+		seen[mount.Destination] = true
+		switch mount.Destination {
+		case controlContainerPath:
+			if mount.Type != "bind" || mount.Source != controlHostPath || *mount.RW {
+				return false
+			}
+		case "/workspace":
+			if mount.Type != "volume" || mount.Name != volumeName(c.Config.Labels[idLabel]) || !*mount.RW {
+				return false
+			}
+			workspaceSource = mount.Source
+		default:
+			return false
+		}
+	}
+	// Binds is a redundant saved representation on some Podman versions.
+	// Restrict it as well; effective mounts above remain the primary assertion.
+	for _, bind := range c.HostConfig.Binds {
+		parts := strings.Split(bind, ":")
+		if len(parts) != 3 {
+			return false
+		}
+		if parts[0] == controlHostPath && parts[1] == controlContainerPath && contains(strings.Split(parts[2], ","), "ro") {
+			continue
+		}
+		// Some versions save the resolved volume source and omit the default
+		// rw option. The effective volume name/RW flag is asserted above.
+		volumeSource := parts[0] == volumeName(c.Config.Labels[idLabel]) || (workspaceSource != "" && parts[0] == workspaceSource)
+		if volumeSource && parts[1] == "/workspace" && !contains(strings.Split(parts[2], ","), "ro") {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (c *containerInspection) verifyUserNamespace() bool {

@@ -4,6 +4,8 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"debug/buildinfo"
+	"debug/elf"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -12,7 +14,11 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
+
+	"github.com/r-agatsuma/mcp-remote-workspace/internal/control"
 )
 
 //go:embed containers.conf
@@ -25,8 +31,9 @@ type Runner interface {
 }
 
 type podman struct {
-	dir string
-	env []string
+	dir      string
+	stateDir string
+	env      []string
 }
 
 func newPodman() (*podman, error) {
@@ -44,7 +51,11 @@ func newPodman() (*podman, error) {
 	if err := prepareConfiguration(dir); err != nil {
 		return nil, err
 	}
-	return &podman{dir: dir, env: podmanEnvironment(u.HomeDir, u.Uid, dir)}, nil
+	stateDir := filepath.Join(u.HomeDir, ".local/share/mcp-workspaced-v0")
+	if err := privateDirectory(stateDir); err != nil {
+		return nil, err
+	}
+	return &podman{dir: dir, stateDir: stateDir, env: podmanEnvironment(u.HomeDir, u.Uid, dir)}, nil
 }
 
 func prepareConfiguration(dir string) error {
@@ -135,6 +146,90 @@ func (p *podman) Run(ctx context.Context, args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+type limitedBuffer struct {
+	bytes.Buffer
+	limit    int64
+	overflow bool
+}
+
+func (b *limitedBuffer) Write(data []byte) (int, error) {
+	n := len(data)
+	remaining := b.limit - int64(b.Len())
+	if int64(len(data)) > remaining {
+		b.overflow = true
+		data = data[:int(remaining)]
+	}
+	_, _ = b.Buffer.Write(data)
+	return n, nil
+}
+
+func (p *podman) Operate(ctx context.Context, input []byte, limit int64, args ...string) ([]byte, error) {
+	cmd := p.command(ctx, args...)
+	cmd.Stdin = bytes.NewReader(input)
+	stdout := &limitedBuffer{limit: limit}
+	stderr := &limitedBuffer{limit: control.StreamLimit}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = time.Second
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("podman control transport failed: %w", err)
+	}
+	if stdout.overflow || stderr.overflow {
+		return nil, errors.New("control transport exceeded response limit")
+	}
+	return stdout.Bytes(), nil
+}
+
+// Refuse a dynamically linked or unexpected control program. Operators install
+// this fixed artifact; the daemon never builds it, downloads it or repairs it.
+func verifyControlRuntime(path string) error {
+	for current := path; current != "/"; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("control runtime must be installed: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+			return errors.New("control runtime and parents must not be symlinks or writable by other users")
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || (stat.Uid != 0 && stat.Uid != uint32(os.Geteuid())) {
+			return errors.New("control runtime and parents must be owned by root or the service user")
+		}
+		if current == path && (!info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0) {
+			return errors.New("control runtime must be an executable regular file")
+		}
+	}
+	return verifyControlArtifact(path)
+}
+
+func verifyControlArtifact(path string) error {
+	file, err := elf.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	for _, program := range file.Progs {
+		if program.Type == elf.PT_INTERP {
+			return errors.New("control runtime must be statically linked")
+		}
+	}
+	if libraries, err := file.ImportedLibraries(); err != nil || len(libraries) != 0 {
+		return errors.New("control runtime must not import shared libraries")
+	}
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if info.Path != "github.com/r-agatsuma/mcp-remote-workspace/cmd/mcp-control" {
+		return errors.New("unexpected control runtime program")
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "CGO_ENABLED" && setting.Value == "0" {
+			return nil
+		}
+	}
+	return errors.New("control runtime must be built with CGO_ENABLED=0")
+}
+
 func privateDirectory(path string) error {
 	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
@@ -152,9 +247,26 @@ func privateDirectory(path string) error {
 // Open validates the prepared host and recovers the registry before serving MCP.
 // Immutable runtime configuration and workspaces survive daemon exit.
 func Open(ctx context.Context) (*Manager, error) {
+	limit := control.DefaultTextLimit
+	// This service/operator setting is never supplied by a tool caller.
+	if value := os.Getenv("MCP_MAX_TEXT_BYTES"); value != "" {
+		var err error
+		limit, err = strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || limit < 1 || limit > 64*1024*1024 {
+			return nil, errors.New("MCP_MAX_TEXT_BYTES must be between 1 and 67108864")
+		}
+	}
+	if err := verifyControlRuntime(controlHostPath); err != nil {
+		return nil, err
+	}
 	p, err := newPodman()
 	if err != nil {
 		return nil, err
 	}
-	return New(ctx, p)
+	m, err := New(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	m.maxTextBytes = limit
+	return m, nil
 }

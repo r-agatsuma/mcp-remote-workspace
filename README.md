@@ -6,7 +6,8 @@ ChatGPT/OpenAI. The binary exposes **stdio only**, using the official
 
 The v0 tool contract is implemented and validated. `workspace_create` creates an
 empty workspace using local rootless Podman; `workspace_destroy` removes it.
-Public Git bootstrap and the execution, file I/O, and Git change backends remain
+`exec`, `write_text`, and `read_text` operate inside the managed container.
+Public Git bootstrap and the Git change backend remain
 unimplemented and return an MCP tool error with `isError: true` and structured content:
 
 ```json
@@ -29,18 +30,40 @@ All input `path` and `cwd` values are POSIX paths relative to `/workspace`, such
 as `.` or `internal/foo.go`; absolute paths and root escapes are rejected.
 `exec.cwd` defaults to `.`. Shell use requires explicit argv such as
 `["bash", "-lc", "..."]`. Environment values are string overrides, and timeout
-seconds must be positive; future backend limits cannot be disabled by callers.
+seconds must be positive. The default execution timeout is 60 seconds and the
+maximum is 300 seconds; callers cannot disable these limits.
 
 The typed requests/responses and reflected schemas in `internal/mcpserver` define
 the v0 contract. IDs are opaque, timestamps are RFC3339 UTC, and file hashes are
 lowercase SHA-256 of exact bytes. Returned paths will be normalized and relative.
-Execution will report truncation explicitly, and a normal nonzero exit will be
-a successful tool result. Reads will reject oversized and non-UTF-8 files.
+Execution reports separate stdout/stderr, each limited to **256 KiB** of returned
+UTF-8 text, with explicit truncation flags. Invalid output bytes are replaced
+with U+FFFD while preserving the returned byte limit. A normal nonzero exit is
+a successful tool result. Timeout returns `timed_out: true` and a null exit code
+after successful process cleanup.
+
+`read_text` and `write_text` default to a **1 MiB** file/content limit. The operator
+can set `MCP_MAX_TEXT_BYTES` (1–67108864 bytes); tool callers cannot change it.
+Reads never truncate: oversized files return `size_limit`. Non-UTF-8 files,
+files containing NUL bytes, and nonregular files return `non_utf8`.
+Paths reject every `..` component, absolute paths, and **all symlinks**, even
+symlinks targeting another location inside `/workspace`. Directory descriptor
+walking and no-follow opens check effective targets. File operations are
+serialized with execution, so no process from a previous managed execution can
+replace a checked path during I/O. Mutation by trusted operators outside this
+operation path is outside the v0 threat model.
+
+Writes send UTF-8 bytes through JSON stdin to the static helper, with no shell
+interpolation. Missing parents are created with mode 0755 (subject to umask).
+A new mode-0644 file is written and synced in the target directory, then renamed
+over the target atomically; the directory is synced too. Replacement does not
+preserve the old inode or its permissions. A cancelled/failed write has an
+uncertain outcome (old or complete new target); an interrupted helper can leave
+a temporary `.mcp-write-*` file. Hashes and sizes describe exact UTF-8 bytes.
 `workspace_changes` compares the baseline to the current filesystem, including
 local commits, staged/unstaged changes, and untracked files; results will be sorted
 by path. Without an explicit `base_ref`, it uses the recorded source baseline or
-returns `base_ref_required`. Future filesystem backends must also reject effective
-symlink escapes and document a deterministic parent-directory creation policy.
+returns `base_ref_required`.
 
 The intended production host is Debian 13 (Trixie) Minimal. Tunnel setup and
 Ansible deployment belong to separate issues.
@@ -61,6 +84,27 @@ podman --remote=false build -t localhost/mcp-remote-workspace:v0 \
   -f container/Containerfile container
 ```
 
+Build and install the immutable control runtime as an operator before starting
+the daemon (Go 1.24 or newer). Installation is an explicit host preparation step;
+the daemon does not build or repair this artifact:
+
+```sh
+CGO_ENABLED=0 go build -o mcp-control ./cmd/mcp-control
+sudo install -d -m 0755 /usr/local/lib/mcp-workspaced
+sudo install -m 0755 mcp-control /usr/local/lib/mcp-workspaced/mcp-control
+```
+
+The host path is fixed and service-owned. The daemon verifies the Go program
+identity, `CGO_ENABLED=0`, absence of an ELF interpreter/shared-library imports,
+and executable file/parent permissions. Paths cannot be symlinks or writable by
+other users, and must belong to root or the service user. Keep the artifact
+available and unchanged while workspaces exist.
+The daemon alone mounts it read-only at `/run/mcp-control`; callers cannot choose
+or replace it. No mutable Python runtime, dynamic linker, startup hooks or shell
+is used for trusted file operations or PID 1. The normal rootfs remains writable:
+development code can install packages or break `/usr`, `/etc`, Python, or sleep
+without compromising trusted file I/O or stop/start recovery.
+
 The image contains ca-certificates, curl, git, jq, ripgrep, patch, build-essential,
 and python3. It supplies a writable `/workspace` and contains no service
 credentials. The fixed local image tag is resolved once at startup; creation uses
@@ -75,7 +119,9 @@ user namespace, drop all capabilities, enable no-new-privileges and seccomp, and
 use private PID, IPC, UTS, and cgroup namespaces. The network is slirp4netns with
 outbound Internet and host loopback forwarding disabled. There are no user bind
 mounts, host devices, engine sockets, secrets, or published ports. `/workspace`
-lives in the container's writable layer; destroying a workspace loses its data.
+is a separate service-owned writable local Podman volume named from the opaque
+workspace ID. Its ownership labels and local driver with no driver options are
+verified. Destroying a workspace removes both its container and that volume.
 
 `internal/workspace/containers.conf` is embedded in the binary and materialized
 as private application configuration under `/run/user/UID/mcp-workspaced-v0`.
@@ -109,9 +155,36 @@ independent of container IDs. Ownership, workspace ID, UTC creation time, and
 profile version are persisted under `io.github.r-agatsuma.mcp-remote-workspace.*`
 Podman labels. Startup discovers managed containers, including stopped containers
 from interrupted transactions, validates their labels/profile, rejects duplicate
-IDs, and restores the registry without restarting compute or changing the IDs.
+IDs, and restores the registry without changing IDs. Only after validating the
+complete container/volume registry does it reset recovered containers; leftovers
+from a previous daemon are never assumed safe. Orphan volumes from interrupted
+creation are recovered as blocked handles that can be explicitly destroyed.
 Malformed labels or profile drift fail startup without modifying containers and
 require operator investigation using those ownership labels.
+Workspaces from the earlier sleep/writable-layer profile are incompatible with
+this profile. Destroy them with the earlier daemon before upgrading; the new
+daemon does not migrate or silently recreate them.
+
+`exec`, `read_text`, `write_text`, and destruction share an operation lock per
+workspace. The lock remains held through all failure cleanup. Execution is an
+ephemeral job API: persistent/background services are unsupported. A successful
+helper response is not proof of cleanup because untrusted code has the same
+container identity and can kill or interfere with the helper. **Every operation**,
+including successful file I/O, therefore stops the container with timeout zero,
+verifies it is stopped, starts the same container with `/run/mcp-control init`
+as PID 1, and verifies the running profile before releasing the lock. Killing
+the private PID namespace covers new sessions/groups, double forks, daemonized
+children and zombies. The immutable PID 1 also reaps adopted children.
+
+Timeout, cancellation, transport/helper failure and malformed responses all take
+this same recovery path using an independent 45-second cleanup context.
+The existing container ID, mutable writable layer and `/workspace` volume survive
+successful reset. Containers are never automatically recreated. If reset cannot
+be verified, the tool returns `backend_error` and the workspace is blocked until
+explicit `workspace_destroy`. Private host-side block markers under the service
+account's `~/.local/share/mcp-workspaced-v0` preserve blocks across daemon restarts;
+that account's `~/.local/share` parent must already exist. Blocked workspaces are
+not automatically retried or reset on startup; destroy remains available.
 
 Creation rolls back partial failures using a separate bounded cleanup context.
 If the create command fails before returning an ID, cleanup discovers the exact
@@ -147,9 +220,12 @@ gofmt -l cmd internal
 ```
 
 Normal tests mock Podman and require no container host. On a prepared dedicated
-rootless account with the fixed image already built, opt into the integration
+rootless account with the fixed image and static control runtime installed, opt into the integration
 test (it creates and removes one test workspace, checks actual resource limits,
-writes `/workspace`, probes isolation and outbound HTTPS, and tests rediscovery):
+writes/reads/executes a trivial program, checks timeouts/output limits and path
+escapes, exercises daemonized descendants, helper death and cancelled file
+transport recovery, tampers with Python/startup hooks/sleep, probes isolation
+and outbound HTTPS, and tests rediscovery):
 
 ```sh
 MCP_WORKSPACE_INTEGRATION=1 go test ./internal/workspace \

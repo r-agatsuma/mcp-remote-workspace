@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/r-agatsuma/mcp-remote-workspace/internal/control"
 )
 
 const (
@@ -36,21 +38,25 @@ type Workspace struct {
 
 type entry struct {
 	Workspace
-	container string // Only set after inspecting matching ownership labels.
+	container string     // Only set after inspecting matching ownership labels.
+	op        sync.Mutex // Covers operations, destruction and all failure cleanup.
+	blocked   bool
+	deleted   bool
 }
 
 type Manager struct {
-	mu        sync.Mutex
-	runner    Runner
-	imageID   string
-	entries   map[string]*entry
-	destroyed map[string]bool
+	mu           sync.Mutex
+	runner       Runner
+	imageID      string
+	entries      map[string]*entry
+	destroyed    map[string]bool
+	maxTextBytes int64
 }
 
 // New is also the restart boundary: invalid labels, duplicate IDs, or drifted
 // profiles fail startup without mutating any existing containers.
 func New(ctx context.Context, runner Runner) (*Manager, error) {
-	m := &Manager{runner: runner, entries: make(map[string]*entry), destroyed: make(map[string]bool)}
+	m := &Manager{runner: runner, entries: make(map[string]*entry), destroyed: make(map[string]bool), maxTextBytes: control.DefaultTextLimit}
 	data, err := runner.Run(ctx, "info", "--format=json")
 	if err != nil {
 		return nil, err
@@ -112,6 +118,51 @@ func New(ctx context.Context, runner Runner) (*Manager, error) {
 		}
 		m.entries[w.ID] = &entry{Workspace: w, container: id}
 	}
+	// Validate the complete registry before performing any recovery mutation.
+	// Orphan volumes from interrupted creation remain destroyable and blocked.
+	volumes, err := m.discoverVolumes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range volumes {
+		w, _ := v.identity()
+		if e := m.entries[w.ID]; e != nil {
+			if !e.CreatedAt.Equal(w.CreatedAt) {
+				return nil, errors.New("recovered volume ownership disagrees")
+			}
+		} else {
+			m.entries[w.ID] = &entry{Workspace: w, blocked: true}
+		}
+	}
+	for _, e := range m.entries {
+		if e.container != "" {
+			if err := m.volume(ctx, e.Workspace); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, e := range m.entries {
+		if e.container == "" {
+			continue
+		}
+		if state, ok := runner.(BlockState); ok {
+			blocked, err := state.Blocked(e.ID)
+			if err != nil {
+				return nil, err
+			}
+			if blocked {
+				e.blocked = true
+				continue
+			}
+		}
+		// Never trust processes left by an earlier daemon instance. A failed
+		// reset blocks only this workspace so explicit destroy stays available.
+		if err := m.reset(e); err != nil {
+			if err := m.block(e); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return m, nil
 }
 
@@ -129,10 +180,14 @@ func (m *Manager) Create(ctx context.Context) (Workspace, error) {
 	if m.entries[w.ID] != nil || m.destroyed[w.ID] {
 		return Workspace{}, errors.New("workspace ID collision")
 	}
-	e := &entry{Workspace: w}
+	e := &entry{Workspace: w, blocked: true}
 	// Preserve identity even when create fails without returning a usable ID.
 	m.entries[w.ID] = e
-	data, err := m.runner.Run(ctx, createArgs(w, m.imageID)...)
+	err := m.createVolume(ctx, w)
+	var data []byte
+	if err == nil {
+		data, err = m.runner.Run(ctx, createArgs(w, m.imageID)...)
+	}
 	if err == nil {
 		id := strings.TrimSpace(string(data))
 		if !containerIDPattern.MatchString(id) {
@@ -170,6 +225,7 @@ func (m *Manager) Create(ctx context.Context) (Workspace, error) {
 		err = ctx.Err()
 	}
 	if err == nil {
+		e.blocked = false
 		return w, nil
 	}
 	// Request cancellation must never cancel rollback. Do not retry failed
@@ -193,9 +249,21 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		}
 		return ErrNotFound
 	}
+	e.op.Lock()
+	defer e.op.Unlock()
 	if err := m.remove(ctx, e); err != nil {
+		if blockErr := m.block(e); blockErr != nil {
+			return fmt.Errorf("destroy failed: %w; block marker failed: %v", err, blockErr)
+		}
 		return err
 	}
+	if state, ok := m.runner.(BlockState); ok {
+		if err := state.UnblockDestroyed(id); err != nil {
+			e.blocked = true
+			return err
+		}
+	}
+	e.deleted = true
 	delete(m.entries, id)
 	m.destroyed[id] = true
 	return nil
@@ -230,7 +298,7 @@ func (m *Manager) remove(ctx context.Context, e *entry) error {
 			return err
 		}
 	}
-	return nil
+	return m.removeVolume(ctx, e)
 }
 
 func (m *Manager) discover(ctx context.Context, workspaceID string) ([]string, error) {

@@ -15,6 +15,19 @@ import (
 func TestProfileRejectsDriftAtCreateAndRecovery(t *testing.T) {
 	trueValue := true
 	cases := map[string]func(*containerInspection){
+		"missing control mount": func(c *containerInspection) { c.Mounts = c.Mounts[1:] },
+		"writable control mount": func(c *containerInspection) {
+			c.Mounts[0] = json.RawMessage(`{"Type":"bind","Source":"` + controlHostPath + `","Destination":"` + controlContainerPath + `","RW":true}`)
+		},
+		"caller control source": func(c *containerInspection) {
+			c.Mounts[0] = json.RawMessage(`{"Type":"bind","Source":"/tmp/untrusted","Destination":"` + controlContainerPath + `","RW":false}`)
+		},
+		"different workspace volume": func(c *containerInspection) {
+			c.Mounts[1] = json.RawMessage(`{"Type":"volume","Name":"unrelated","Destination":"/workspace","RW":true}`)
+		},
+		"extra mount": func(c *containerInspection) {
+			c.Mounts = append(c.Mounts, json.RawMessage(`{"Type":"bind","Source":"/host","Destination":"/host"}`))
+		},
 		"replacement image":        func(c *containerInspection) { c.Image = strings.Repeat("b", 64) },
 		"readonly rootfs":          func(c *containerInspection) { c.HostConfig.ReadonlyRootfs = &trueValue },
 		"missing rootfs assertion": func(c *containerInspection) { c.HostConfig.ReadonlyRootfs = nil },
@@ -122,13 +135,15 @@ func TestFixedCreationOptions(t *testing.T) {
 		"--workdir=/workspace", "--image-volume=ignore", "--cpu-period=100000", "--cpu-quota=200000",
 		"--memory=2147483648", "--memory-swap=2147483648", "--pids-limit=256", "--sdnotify=ignore", "--unsetenv-all",
 		"--hostname=mcp-workspace", "--env=HOSTNAME=mcp-workspace",
+		"--entrypoint=" + controlContainerPath,
+		"--mount=type=bind,source=" + controlHostPath + ",destination=" + controlContainerPath + ",ro=true",
 	} {
 		if !slices.Contains(args, option) {
 			t.Errorf("missing required option %s", option)
 		}
 	}
 	for _, arg := range args {
-		for _, forbidden := range []string{"--volume", "--mount", "--device", "--cap-add", "--env-host", "--env-file", "--pod="} {
+		for _, forbidden := range []string{"--volume", "--device", "--cap-add", "--env-host", "--env-file", "--pod="} {
 			if strings.HasPrefix(arg, forbidden) {
 				t.Errorf("unsafe option: %s", arg)
 			}
@@ -194,6 +209,24 @@ func TestAutoIDMappings(t *testing.T) {
 				t.Fatalf("valid=%v, want %v", got, tc.valid)
 			}
 		})
+	}
+}
+
+func TestServiceMountSavedRepresentations(t *testing.T) {
+	id := "ws_" + strings.Repeat("a", 64)
+	for _, source := range []string{volumeName(id), "/service/storage/volumes/" + volumeName(id) + "/_data"} {
+		c := fixture()
+		c.Config.Labels[idLabel] = id
+		c.Mounts = fixtureMounts(id)
+		c.Mounts[1] = json.RawMessage(`{"Type":"volume","Name":"` + volumeName(id) + `","Source":"/service/storage/volumes/` + volumeName(id) + `/_data","Destination":"/workspace","RW":true}`)
+		c.HostConfig.Binds = []string{controlHostPath + ":" + controlContainerPath + ":ro,rprivate,rbind", source + ":/workspace:nosuid,nodev,rbind"}
+		if err := c.verify(testImageID); err != nil {
+			t.Fatal("valid service mounts rejected", err)
+		}
+		c.HostConfig.Binds[1] = "/unrelated:/workspace:rw"
+		if err := c.verify(testImageID); err == nil {
+			t.Fatal("arbitrary saved bind accepted")
+		}
 	}
 }
 

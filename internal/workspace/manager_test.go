@@ -22,7 +22,7 @@ const inspectionFixture = `{
    "Labels":{}, "WorkingDir":"/workspace", "User":"0:0",
    "Hostname":"mcp-workspace", "CreateCommand":["/usr/bin/podman","create","--userns=auto:size=65536"],
    "Env":["HOME=/root","LANG=C.UTF-8","PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","HOSTNAME=mcp-workspace"],
-   "Entrypoint":["/usr/bin/sleep"], "Cmd":["infinity"],
+   "Entrypoint":["/run/mcp-control"], "Cmd":["init"],
    "sdNotifyMode":"ignore", "sdNotifySocket":"", "SystemdMode":false
  },
  "HostConfig":{
@@ -37,6 +37,7 @@ const inspectionFixture = `{
 }`
 
 type fakePodman struct {
+	volumes       map[string]volumeInspection
 	containers    map[string]*containerInspection
 	calls         [][]string
 	contexts      []error
@@ -52,7 +53,7 @@ type fakePodman struct {
 }
 
 func newFake() *fakePodman {
-	return &fakePodman{containers: make(map[string]*containerInspection), counts: make(map[string]int), persist: true,
+	return &fakePodman{volumes: make(map[string]volumeInspection), containers: make(map[string]*containerInspection), counts: make(map[string]int), persist: true,
 		info: `{"host":{"security":{"rootless":true},"cgroupVersion":"v2","cgroupControllers":["cpu","memory","pids"]}}`}
 }
 
@@ -60,7 +61,7 @@ func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, slices.Clone(args))
 	f.contexts = append(f.contexts, ctx.Err())
 	key := args[0]
-	if key == "container" {
+	if key == "container" || key == "volume" {
 		key += " " + args[1]
 	}
 	f.counts[key]++
@@ -76,6 +77,35 @@ func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 	}
 	marshal := func(value any) ([]byte, error) { return json.Marshal(value) }
 	switch key {
+	case "volume create":
+		v := volumeInspection{Name: args[len(args)-1], Driver: "local", Labels: map[string]string{}}
+		for _, arg := range args {
+			if label, ok := strings.CutPrefix(arg, "--label="); ok {
+				key, value, _ := strings.Cut(label, "=")
+				v.Labels[key] = value
+			}
+		}
+		f.volumes[v.Name] = v
+		return []byte(v.Name), nil
+	case "volume inspect":
+		v, ok := f.volumes[args[len(args)-1]]
+		if !ok {
+			return nil, errors.New("missing volume")
+		}
+		return marshal([]volumeInspection{v})
+	case "volume ls":
+		volumes := []volumeInspection{}
+		for _, v := range f.volumes {
+			volumes = append(volumes, v)
+		}
+		return marshal(volumes)
+	case "volume rm":
+		delete(f.volumes, args[len(args)-1])
+		return nil, nil
+	case "stop":
+		c := f.containers[args[len(args)-1]]
+		c.State.Status, c.State.Running = "exited", false
+		return nil, nil
 	case "info":
 		return []byte(f.info), nil
 	case "image":
@@ -113,6 +143,7 @@ func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 					c.Config.Labels[name] = value
 				}
 			}
+			c.Mounts = fixtureMounts(c.Config.Labels[idLabel])
 			if f.mutate != nil {
 				f.mutate(c)
 			}
@@ -153,7 +184,12 @@ func fixture() *containerInspection {
 	if err := json.Unmarshal([]byte(inspectionFixture), &c); err != nil {
 		panic(err)
 	}
+	c.Mounts = fixtureMounts(c.Config.Labels[idLabel])
 	return &c
+}
+
+func fixtureMounts(id string) []json.RawMessage {
+	return []json.RawMessage{json.RawMessage(`{"Type":"bind","Source":"` + controlHostPath + `","Destination":"` + controlContainerPath + `","RW":false}`), json.RawMessage(`{"Type":"volume","Name":"` + volumeName(id) + `","Destination":"/workspace","RW":true}`)}
 }
 
 func openFake(t *testing.T, f *fakePodman) *Manager {
@@ -183,12 +219,12 @@ func TestCreateDestroyAndRestart(t *testing.T) {
 			t.Fatalf("unexpected started profile: %+v", c)
 		}
 	}
-	// New daemon receives the same opaque ID from labels, without touching compute.
+	// New daemon receives the same opaque ID from labels, after resetting uncertain compute.
 	restarted := openFake(t, f)
 	if got := restarted.entries[w.ID]; got == nil || !got.CreatedAt.Equal(w.CreatedAt) {
 		t.Fatalf("recovery lost identity: %+v", got)
 	}
-	if f.counts["create"] != 1 || f.counts["start"] != 1 || f.counts["rm"] != 0 {
+	if f.counts["create"] != 1 || f.counts["start"] != 2 || f.counts["stop"] != 1 || f.counts["rm"] != 0 {
 		t.Fatalf("unexpected lifecycle: %v", f.counts)
 	}
 	if err := restarted.Destroy(context.Background(), w.ID); err != nil {
@@ -238,8 +274,8 @@ func TestRecoveryOfStoppedWorkspace(t *testing.T) {
 		c.State.Status, c.State.Running = "exited", false
 	}
 	restarted := openFake(t, f)
-	if restarted.entries[w.ID] == nil || f.counts["start"] != 1 {
-		t.Fatal("stopped workspace was lost or restarted")
+	if restarted.entries[w.ID] == nil || f.counts["start"] != 2 {
+		t.Fatal("stopped workspace was lost or not reset")
 	}
 	if err := restarted.Destroy(context.Background(), w.ID); err != nil {
 		t.Fatal(err)
@@ -472,6 +508,7 @@ func TestRecoveryRejectsLabelsAndDuplicates(t *testing.T) {
 		duplicate := fixture()
 		duplicate.ID = strings.Repeat("b", 64)
 		duplicate.Config.Labels = map[string]string{managedLabel: "true", idLabel: w.ID, createdLabel: w.CreatedAt.Format(time.RFC3339Nano), profileLabel: "v0"}
+		duplicate.Mounts = fixtureMounts(w.ID)
 		f.containers[duplicate.ID] = duplicate
 		if _, err := New(context.Background(), f); err == nil || !strings.Contains(err.Error(), "duplicate workspace ID") {
 			t.Fatalf("duplicate accepted: %v", err)
