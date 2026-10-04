@@ -135,6 +135,43 @@ func (p *podman) Run(ctx context.Context, args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+// boundedBuffer keeps draining the pipe after reaching its storage limit.
+type boundedBuffer struct {
+	data      []byte
+	limit     int64
+	truncated bool
+}
+
+func (b *boundedBuffer) Write(data []byte) (int, error) {
+	n := len(data)
+	space := b.limit - int64(len(b.data))
+	if int64(n) > space {
+		b.truncated = true
+		data = data[:space]
+	}
+	b.data = append(b.data, data...)
+	return n, nil
+}
+
+func (p *podman) RunInput(ctx context.Context, input []byte, limit int64, args ...string) ([]byte, error) {
+	cmd := p.command(ctx, args...)
+	cmd.Stdin = bytes.NewReader(input)
+	stdout := &boundedBuffer{limit: limit}
+	stderr := &boundedBuffer{limit: MaxStreamBytes}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = 2 * time.Second
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return nil, fmt.Errorf("podman %s: %w", args[0], err)
+	}
+	if stdout.truncated {
+		return nil, errors.New("workspace helper response exceeds transport size limit")
+	}
+	return stdout.data, nil
+}
+
 func privateDirectory(path string) error {
 	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
@@ -152,9 +189,13 @@ func privateDirectory(path string) error {
 // Open validates the prepared host and recovers the registry before serving MCP.
 // Immutable runtime configuration and workspaces survive daemon exit.
 func Open(ctx context.Context) (*Manager, error) {
+	return OpenWithOptions(ctx, Options{})
+}
+
+func OpenWithOptions(ctx context.Context, options Options) (*Manager, error) {
 	p, err := newPodman()
 	if err != nil {
 		return nil, err
 	}
-	return New(ctx, p)
+	return NewWithOptions(ctx, p, options)
 }

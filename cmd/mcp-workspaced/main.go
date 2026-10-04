@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -13,7 +14,10 @@ import (
 	"github.com/r-agatsuma/mcp-remote-workspace/internal/workspace"
 )
 
+var maxTextFileBytes = flag.Int64("max-text-file-bytes", workspace.DefaultMaxTextFileBytes, "maximum read_text file size in bytes")
+
 func main() {
+	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx); err != nil {
@@ -23,7 +27,10 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	backend, err := workspace.Open(ctx)
+	if *maxTextFileBytes <= 0 {
+		return errors.New("max-text-file-bytes must be positive")
+	}
+	backend, err := workspace.OpenWithOptions(ctx, workspace.Options{MaxTextFileBytes: *maxTextFileBytes})
 	if err != nil {
 		return err
 	}

@@ -186,6 +186,7 @@ func TestInvalidArguments(t *testing.T) {
 		{"exec", `{"workspace_id":"ws","argv":["go"],"timeout_seconds":0}`},
 		{"exec", `{"workspace_id":"ws","argv":["go"],"timeout_seconds":-1}`},
 		{"exec", `{"workspace_id":"ws","argv":["go"],"timeout_seconds":1.5}`},
+		{"exec", `{"workspace_id":"ws","argv":["go"],"timeout_seconds":601}`},
 		{"exec", `{"workspace_id":"ws","argv":["go"],"env":{"FOO":1}}`},
 		{"exec", `{"workspace_id":"ws","argv":["go"],"cwd":null}`},
 		{"write_text", `{"workspace_id":"ws","path":"file"}`},
@@ -239,7 +240,7 @@ func assertToolError(t *testing.T, result *mcp.CallToolResult, code ErrorCode) {
 
 func TestDomainValidation(t *testing.T) {
 	ctx, client := connect(t)
-	for _, value := range []string{"", "/workspace/foo.go", "/etc/passwd", "../foo", "a/../../foo", "a\x00b"} {
+	for _, value := range []string{"", "/workspace/foo.go", "/etc/passwd", "../foo", "a/../../foo", "a/../foo", "a\x00b"} {
 		for _, name := range []string{"exec", "write_text", "read_text"} {
 			t.Run(name+value, func(t *testing.T) {
 				args := map[string]any{"workspace_id": "ws", "path": value}

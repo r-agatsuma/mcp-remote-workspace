@@ -63,11 +63,12 @@ func execInputSchema() *jsonschema.Schema {
 	// Reflection permits null for slices; the v0 contract requires an array.
 	s.Properties["argv"].Type, s.Properties["argv"].Types = "array", nil
 	s.Properties["argv"].MinItems = pointer(1)
-	s.Properties["argv"].Items.MinLength = pointer(1)
+	s.Properties["argv"].PrefixItems = []*jsonschema.Schema{{Type: "string", MinLength: pointer(1)}}
 	s.Properties["cwd"].Default = json.RawMessage(`"."`)
 	s.Properties["cwd"].Description = "POSIX path relative to /workspace; must not escape the root."
 	s.Properties["timeout_seconds"].Minimum = pointer(float64(1))
-	s.Properties["timeout_seconds"].Description = "Positive seconds; backend defaults and maximum still apply."
+	s.Properties["timeout_seconds"].Maximum = pointer(float64(600))
+	s.Properties["timeout_seconds"].Description = "Positive seconds, maximum 600; defaults to 60."
 	return s
 }
 

@@ -22,6 +22,12 @@ type Lifecycle interface {
 	Destroy(context.Context, string) error
 }
 
+type Operations interface {
+	Exec(context.Context, string, workspace.ExecRequest) (workspace.ExecResult, error)
+	WriteText(context.Context, string, string, string) (workspace.TextResult, error)
+	ReadText(context.Context, string, string) (workspace.TextResult, error)
+}
+
 // A nil lifecycle supports contract tests without requiring a prepared host.
 // The daemon always supplies a recovered rootless Podman manager.
 func New(lifecycle Lifecycle) *mcp.Server {
@@ -39,9 +45,19 @@ func New(lifecycle Lifecycle) *mcp.Server {
 		}
 		return nil, WorkspaceCreateOutput{WorkspaceID: WorkspaceID(w.ID), CreatedAt: Timestamp(w.CreatedAt.Format(time.RFC3339Nano)), Source: SourceOutput{Type: SourceEmpty}}, nil
 	})
-	addStub[ExecInput](s, "exec", "Run one process inside an existing workspace. argv has no implicit shell expansion; cwd is workspace-relative. Backend time and output limits apply.", execInputSchema(), schemaFor[ExecOutput](), func(_ *mcp.CallToolRequest, in ExecInput) *ToolError { return validatePath(in.Cwd, false) })
-	addStub[WriteTextInput](s, "write_text", "Replace one complete UTF-8 text file at a workspace-relative path; no patch, append, or shell interpolation.", schemaFor[WriteTextInput](), schemaFor[WriteTextOutput](), validateWrite)
-	addStub[ReadTextInput](s, "read_text", "Retrieve one complete UTF-8 text file at a workspace-relative path. Oversized or non-UTF-8 files return errors; content is never silently truncated.", schemaFor[ReadTextInput](), schemaFor[ReadTextOutput](), func(_ *mcp.CallToolRequest, in ReadTextInput) *ToolError { return validatePath(in.Path, true) })
+	operations, _ := lifecycle.(Operations)
+	addOperation(s, "exec", "Run argv without an implicit shell inside the workspace. cwd defaults to '.'; symlinks are rejected. Timeout defaults to 60 seconds (maximum 600). Each output stream is limited to 256 KiB with explicit truncation flags.", execInputSchema(), schemaFor[ExecOutput](), func(_ *mcp.CallToolRequest, in ExecInput) *ToolError { return validatePath(in.Cwd, false) }, operations, func(ctx context.Context, in ExecInput) (any, error) {
+		out, err := operations.Exec(ctx, string(in.WorkspaceID), workspace.ExecRequest{Argv: in.Argv, Cwd: in.Cwd, Env: in.Env, Timeout: time.Duration(in.TimeoutSeconds) * time.Second})
+		return ExecOutput(out), err
+	})
+	addOperation(s, "write_text", "Atomically replace one complete UTF-8 text file using stdin, without shell interpolation. Parent directories must already exist; symlinks are rejected.", schemaFor[WriteTextInput](), schemaFor[WriteTextOutput](), validateWrite, operations, func(ctx context.Context, in WriteTextInput) (any, error) {
+		out, err := operations.WriteText(ctx, string(in.WorkspaceID), in.Path, in.Content)
+		return WriteTextOutput{Path: ReturnedPath(out.Path), SizeBytes: out.SizeBytes, SHA256: SHA256(out.SHA256)}, err
+	})
+	addOperation(s, "read_text", "Read a complete UTF-8 file. Configured byte-size limit applies (default 1 MiB); oversized, binary, non-UTF-8 and symlink files are rejected. Content is never truncated.", schemaFor[ReadTextInput](), schemaFor[ReadTextOutput](), func(_ *mcp.CallToolRequest, in ReadTextInput) *ToolError { return validatePath(in.Path, true) }, operations, func(ctx context.Context, in ReadTextInput) (any, error) {
+		out, err := operations.ReadText(ctx, string(in.WorkspaceID), in.Path)
+		return ReadTextOutput{Path: ReturnedPath(out.Path), Content: out.Content, SizeBytes: out.SizeBytes, SHA256: SHA256(out.SHA256)}, err
+	})
 	addStub[WorkspaceChangesInput](s, "workspace_changes", "List Git change metadata relative to base_ref or the recorded source baseline, including local commits, staged, unstaged, and untracked files. No file bodies; missing baseline requires base_ref.", schemaFor[WorkspaceChangesInput](), changesOutputSchema(), nil)
 	mcp.AddTool(s, &mcp.Tool{Name: "workspace_destroy", Description: "Permanently remove one disposable workspace. Unknown IDs return workspace_not_found.", InputSchema: schemaFor[WorkspaceDestroyInput](), OutputSchema: destroyOutputSchema()}, func(ctx context.Context, _ *mcp.CallToolRequest, in WorkspaceDestroyInput) (*mcp.CallToolResult, any, error) {
 		if lifecycle == nil {
@@ -57,6 +73,37 @@ func New(lifecycle Lifecycle) *mcp.Server {
 		return nil, WorkspaceDestroyOutput{WorkspaceID: in.WorkspaceID, Destroyed: true}, nil
 	})
 	return s
+}
+
+func addOperation[In any](s *mcp.Server, name, description string, input, output *jsonschema.Schema, validate func(*mcp.CallToolRequest, In) *ToolError, backend Operations, run func(context.Context, In) (any, error)) {
+	mcp.AddTool(s, &mcp.Tool{Name: name, Description: description, InputSchema: input, OutputSchema: output}, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+		if err := validate(req, in); err != nil {
+			return errorResult(*err), nil, nil
+		}
+		if backend == nil {
+			return errorResult(ToolError{ErrorNotImplemented, "workspace backend is not implemented"}), nil, nil
+		}
+		out, err := run(ctx, in)
+		if err == nil {
+			return nil, out, nil
+		}
+		code := ErrorBackend
+		switch {
+		case errors.Is(err, workspace.ErrNotFound):
+			code = ErrorWorkspaceNotFound
+		case errors.Is(err, workspace.ErrInvalidPath):
+			code = ErrorInvalidPath
+		case errors.Is(err, workspace.ErrInvalidArgument):
+			code = ErrorInvalidArgument
+		case errors.Is(err, workspace.ErrSizeLimit):
+			code = ErrorSizeLimit
+		case errors.Is(err, workspace.ErrNonUTF8):
+			code = ErrorNonUTF8
+		case errors.Is(err, context.DeadlineExceeded):
+			code = ErrorTimeout
+		}
+		return errorResult(ToolError{code, err.Error()}), nil, nil
+	})
 }
 
 func addStub[In any](s *mcp.Server, name, description string, input, output *jsonschema.Schema, validate func(*mcp.CallToolRequest, In) *ToolError) {
@@ -150,6 +197,11 @@ func validatePath(value string, file bool) *ToolError {
 	normalized := path.Clean(value)
 	if value == "" || strings.HasPrefix(value, "/") || strings.ContainsRune(value, '\x00') || normalized == ".." || strings.HasPrefix(normalized, "../") || (file && normalized == ".") {
 		return &ToolError{ErrorInvalidPath, "path must be relative to the workspace root and must not escape it"}
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == ".." {
+			return &ToolError{ErrorInvalidPath, "path must not contain '..' components"}
+		}
 	}
 	return nil
 }

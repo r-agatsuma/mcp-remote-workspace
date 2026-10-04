@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -36,6 +37,50 @@ func TestRootlessPodmanIntegration(t *testing.T) {
 		}
 	})
 	id := m.entries[w.ID].container
+	t.Run("safe execution and text IO", func(t *testing.T) {
+		written, err := m.WriteText(ctx, w.ID, "./program.py", "print('hello 日本語')\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		read, err := m.ReadText(ctx, w.ID, "program.py")
+		if err != nil || read.Path != "program.py" || read.Content != "print('hello 日本語')\n" || read.SizeBytes != written.SizeBytes || read.SHA256 != written.SHA256 {
+			t.Fatalf("read: %+v, %v", read, err)
+		}
+		out, err := m.Exec(ctx, w.ID, ExecRequest{Argv: []string{"python3", "program.py"}})
+		if err != nil || out.ExitCode == nil || *out.ExitCode != 0 || out.Stdout != "hello 日本語\n" {
+			t.Fatalf("program: %+v, %v", out, err)
+		}
+		out, err = m.Exec(ctx, w.ID, ExecRequest{Argv: []string{"printf", "hello"}})
+		if err != nil || out.Stdout != "hello" || out.Stderr != "" {
+			t.Fatalf("argv: %+v, %v", out, err)
+		}
+		out, err = m.Exec(ctx, w.ID, ExecRequest{Argv: []string{"sleep", "30"}, Timeout: 200 * time.Millisecond})
+		if err != nil || !out.TimedOut || out.ExitCode != nil {
+			t.Fatalf("timeout: %+v, %v", out, err)
+		}
+		out, err = m.Exec(ctx, w.ID, ExecRequest{Argv: []string{"python3", "-c", "import os; os.write(1, b'o'*262145); os.write(2, b'e'*262145)"}})
+		if err != nil || !out.StdoutTruncated || !out.StderrTruncated || out.Stdout != strings.Repeat("o", MaxStreamBytes) || out.Stderr != strings.Repeat("e", MaxStreamBytes) {
+			t.Fatalf("output limits: stdout=%d stderr=%d err=%v", len(out.Stdout), len(out.Stderr), err)
+		}
+		_, err = m.Exec(ctx, w.ID, ExecRequest{Argv: []string{"python3", "-c", "import os; os.symlink('/tmp', 'escape'); open('binary', 'wb').write(b'\\xff'); open('oversized', 'wb').truncate(1048577)"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.ReadText(ctx, w.ID, "binary"); !errors.Is(err, ErrNonUTF8) {
+			t.Fatalf("binary: %v", err)
+		}
+		if _, err := m.ReadText(ctx, w.ID, "oversized"); !errors.Is(err, ErrSizeLimit) {
+			t.Fatalf("oversized: %v", err)
+		}
+		for _, name := range []string{"../escape.txt", "escape/file"} {
+			if _, err := m.WriteText(ctx, w.ID, name, "text"); !errors.Is(err, ErrInvalidPath) {
+				t.Fatalf("escape %s: %v", name, err)
+			}
+		}
+		if _, err := m.Exec(ctx, w.ID, ExecRequest{Argv: []string{"true"}, Cwd: "escape"}); !errors.Is(err, ErrInvalidPath) {
+			t.Fatalf("cwd escape: %v", err)
+		}
+	})
 	// Test-only execution probes actual runtime behavior; it is not an MCP exec
 	// backend or a host shell. Resource files assert enforcement, not just flags.
 	probe := `import os, pathlib

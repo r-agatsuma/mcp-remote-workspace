@@ -40,17 +40,29 @@ type entry struct {
 }
 
 type Manager struct {
-	mu        sync.Mutex
-	runner    Runner
-	imageID   string
-	entries   map[string]*entry
-	destroyed map[string]bool
+	mu               sync.Mutex
+	runner           Runner
+	imageID          string
+	entries          map[string]*entry
+	destroyed        map[string]bool
+	maxTextFileBytes int64
 }
 
 // New is also the restart boundary: invalid labels, duplicate IDs, or drifted
 // profiles fail startup without mutating any existing containers.
 func New(ctx context.Context, runner Runner) (*Manager, error) {
-	m := &Manager{runner: runner, entries: make(map[string]*entry), destroyed: make(map[string]bool)}
+	return NewWithOptions(ctx, runner, Options{})
+}
+
+func NewWithOptions(ctx context.Context, runner Runner, options Options) (*Manager, error) {
+	if options.MaxTextFileBytes == 0 {
+		options.MaxTextFileBytes = DefaultMaxTextFileBytes
+	}
+	// Allow worst-case JSON escaping without overflowing the transport bound.
+	if options.MaxTextFileBytes < 0 || options.MaxTextFileBytes > (1<<63-1-4096)/6 {
+		return nil, errors.New("invalid maximum text-file size")
+	}
+	m := &Manager{runner: runner, entries: make(map[string]*entry), destroyed: make(map[string]bool), maxTextFileBytes: options.MaxTextFileBytes}
 	data, err := runner.Run(ctx, "info", "--format=json")
 	if err != nil {
 		return nil, err

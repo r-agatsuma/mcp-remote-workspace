@@ -6,7 +6,8 @@ ChatGPT/OpenAI. The binary exposes **stdio only**, using the official
 
 The v0 tool contract is implemented and validated. `workspace_create` creates an
 empty workspace using local rootless Podman; `workspace_destroy` removes it.
-Public Git bootstrap and the execution, file I/O, and Git change backends remain
+`exec`, `write_text`, and `read_text` operate inside that managed container.
+Public Git bootstrap and the Git change backend remain
 unimplemented and return an MCP tool error with `isError: true` and structured content:
 
 ```json
@@ -26,21 +27,47 @@ return `invalid_path`. Public Git URLs with embedded credentials are rejected.
 | `workspace_destroy` | Permanently remove a disposable workspace. |
 
 All input `path` and `cwd` values are POSIX paths relative to `/workspace`, such
-as `.` or `internal/foo.go`; absolute paths and root escapes are rejected.
+as `.` or `internal/foo.go`; absolute paths and all `..` components are rejected.
+File and cwd resolution opens each component with `O_NOFOLLOW` through pinned
+directory descriptors. All symlinks are rejected, including links within the
+workspace, dangling links, and a symlink replacing `/workspace`; special files
+are also rejected by text I/O. This checks the effective target rather than only
+cleaning the input string, and avoids following a link substituted during lookup.
 `exec.cwd` defaults to `.`. Shell use requires explicit argv such as
 `["bash", "-lc", "..."]`. Environment values are string overrides, and timeout
-seconds must be positive; future backend limits cannot be disabled by callers.
+seconds must be positive (default **60**, maximum **600**). Overrides apply to the
+requested process, never to Podman or the helper. stdin for that process is closed.
+
+Execution uses an embedded Python 3 helper launched via `podman exec`, with JSON
+requests on stdin and no implicit shell. It drains stdout and stderr separately,
+returns the exit code (including normal nonzero exits), and retains at most
+**256 KiB per stream** (`workspace.MaxStreamBytes`). Each stream has an explicit
+truncation flag. Invalid output UTF-8 is replaced, and the returned UTF-8 strings
+are bounded by the same byte limit. On timeout the helper sends SIGKILL to the
+process group, reaps the requested process, and returns `timed_out: true` with
+`exit_code: null` and captured output. Group cleanup also occurs on normal exit;
+commands should not leave background processes running. The deadline remains
+active when pipes close early or descendants keep pipes open. The host also
+bounds the serialized helper response and diagnostic buffers.
+
+`write_text` encodes the supplied UTF-8 string directly to bytes, fsyncs a new
+temporary file in the target directory, and atomically replaces the target entry.
+Parent directories **must already exist**; create them explicitly with `exec` if
+needed. New/replacement files use mode 0644 subject to the container umask.
+`read_text` accepts regular UTF-8 files without NUL bytes (the binary-file check).
+Its default maximum is **1 MiB**, configurable at daemon startup with
+`-max-text-file-bytes N` (positive bytes), or through `workspace.Options` in Go.
+An oversized file returns `size_limit`, and invalid UTF-8 or NUL-containing files
+return `non_utf8`; reads never truncate content. Both file tools return the
+normalized relative path, byte size, and SHA-256 of the exact file bytes.
 
 The typed requests/responses and reflected schemas in `internal/mcpserver` define
 the v0 contract. IDs are opaque, timestamps are RFC3339 UTC, and file hashes are
-lowercase SHA-256 of exact bytes. Returned paths will be normalized and relative.
-Execution will report truncation explicitly, and a normal nonzero exit will be
-a successful tool result. Reads will reject oversized and non-UTF-8 files.
+lowercase SHA-256 of exact bytes. Returned paths are normalized and relative.
 `workspace_changes` compares the baseline to the current filesystem, including
 local commits, staged/unstaged changes, and untracked files; results will be sorted
 by path. Without an explicit `base_ref`, it uses the recorded source baseline or
-returns `base_ref_required`. Future filesystem backends must also reject effective
-symlink escapes and document a deterministic parent-directory creation policy.
+returns `base_ref_required` once that backend is implemented.
 
 The intended production host is Debian 13 (Trixie) Minimal. Tunnel setup and
 Ansible deployment belong to separate issues.
@@ -146,10 +173,15 @@ go vet ./...
 gofmt -l cmd internal
 ```
 
-Normal tests mock Podman and require no container host. On a prepared dedicated
+Normal tests mock Podman and require no container host. Operation tests use
+Python 3 to run the embedded helper against temporary test directories, covering
+argv/environment behavior, UTF-8 round trips, timeout/process-group cleanup,
+output truncation, size limits, traversal, symlinks, and special-file rejection.
+On a prepared dedicated
 rootless account with the fixed image already built, opt into the integration
 test (it creates and removes one test workspace, checks actual resource limits,
-writes `/workspace`, probes isolation and outbound HTTPS, and tests rediscovery):
+writes/reads/executes a program, checks timeout/output/file limits and path
+security, probes isolation and outbound HTTPS, and tests rediscovery):
 
 ```sh
 MCP_WORKSPACE_INTEGRATION=1 go test ./internal/workspace \
