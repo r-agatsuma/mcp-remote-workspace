@@ -67,9 +67,12 @@ It drops all capabilities and enables no-new-privileges. No host directories,
 devices, engine sockets or credentials are passed into the container; automatic
 mounts from mounts.conf and host proxy environment forwarding are disabled.
 Each Podman command uses a service-owned, last-loaded containers.conf override
-that clears default devices, including configurations with array appending
-enabled. Other host engine settings are preserved. This prevents rootless
-device bind mounts that ordinary container inspect does not expose.
+that clears default devices and OCI hook directories, including configurations
+with array appending enabled. Other host engine settings are preserved. This
+prevents hidden rootless device bind mounts and hooks that could change the OCI
+configuration after inspection. Host `NOTIFY_SOCKET` is removed from Podman's
+environment, and creation explicitly uses `--sdnotify=ignore` to prevent
+notification socket mounts and environment additions at startup.
 See the [containers.conf documentation](https://github.com/containers/common/blob/v0.62.2/docs/containers.conf.5.md)
 for configuration precedence and array replacement.
 The effective container configuration is inspected before starting and on
@@ -119,7 +122,9 @@ Normal tests mock Podman commands and cover recovery, unknown IDs, duplicate
 destroy, isolation policy and command failures. On a prepared rootless Podman
 host with the image already built, run the opt-in integration test to verify
 actual creation, recovery, outbound HTTPS, writable storage, installed tools,
-host home/socket isolation and removal:
+host home/socket isolation and removal. The test also configures host device
+defaults, an OCI precreate hook and a notification socket to verify they do not
+reach the workspace or disrupt recovery:
 
 ```sh
 MCP_WORKSPACE_PODMAN_TEST=1 go test ./internal/workspace -run TestRootlessPodmanIntegration -v

@@ -113,7 +113,7 @@ func TestCreateRecoverDestroy(t *testing.T) {
 	for _, args := range f.calls {
 		if args[0] == "create" {
 			create++
-			for _, want := range []string{"--pull=never", "--privileged=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--userns=nomap", "--user=0:0", "--pid=private", "--ipc=private", "--network=slirp4netns:allow_host_loopback=false", "--cgroups=enabled", "--cpu-period=100000", "--cpu-quota=200000", "--memory=1073741824", "--pids-limit=256", "--image-volume=ignore", "--http-proxy=false", "--unsetenv-all", "--workdir=/workspace", Image} {
+			for _, want := range []string{"--pull=never", "--privileged=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--userns=nomap", "--user=0:0", "--pid=private", "--ipc=private", "--network=slirp4netns:allow_host_loopback=false", "--cgroups=enabled", "--cpu-period=100000", "--cpu-quota=200000", "--memory=1073741824", "--pids-limit=256", "--image-volume=ignore", "--http-proxy=false", "--unsetenv-all", "--sdnotify=ignore", "--workdir=/workspace", Image} {
 				if !slices.Contains(args, want) {
 					t.Errorf("missing policy argument %q", want)
 				}
@@ -167,6 +167,45 @@ func TestCreateRecoverDestroy(t *testing.T) {
 	}
 	if err := restarted.Destroy(ctx, w.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("destroy after restart: %v", err)
+	}
+}
+
+func TestCreateRecoverWithHostNotifySocket(t *testing.T) {
+	t.Setenv("NOTIFY_SOCKET", "/run/user/1000/workspace-test-notify.sock")
+	f := &fakePodman{}
+	ignoreNotify := false
+	run := func(ctx context.Context, args ...string) ([]byte, error) {
+		if args[0] == "create" {
+			ignoreNotify = slices.Contains(args, "--sdnotify=ignore")
+		}
+		data, err := f.run(ctx, args...)
+		// Podman adds this environment after the pre-start inspection when
+		// the host provides a socket and sdnotify retains its default mode.
+		if err == nil && args[0] == "start" && os.Getenv("NOTIFY_SOCKET") != "" && !ignoreNotify {
+			c := f.containers[args[1]]
+			c.Config.Env = append(c.Config.Env, "NOTIFY_SOCKET=/run/notify/notify.sock")
+			f.containers[args[1]] = c
+		}
+		return data, err
+	}
+	ctx := context.Background()
+	p, err := newPodman(ctx, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := p.Create(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := newPodman(ctx, run)
+	if err != nil {
+		t.Fatalf("recovery with host NOTIFY_SOCKET: %v", err)
+	}
+	if len(recovered.workspaces) != 1 || recovered.workspaces[w.ID].Workspace != w {
+		t.Fatal("recovery did not preserve the workspace")
+	}
+	if err := recovered.Destroy(ctx, w.ID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -461,15 +500,19 @@ func TestCommandBoundary(t *testing.T) {
 	script := `#!/bin/sh
 test "$1" = --remote=false || exit 2
 test "$2" = --default-mounts-file=/dev/null || exit 3
-test -z "$CONTAINER_HOST$CONTAINER_CONNECTION$CONTAINER_SSHKEY$DOCKER_HOST" || exit 4
+test -z "$CONTAINER_HOST$CONTAINER_CONNECTION$CONTAINER_SSHKEY$DOCKER_HOST${NOTIFY_SOCKET+x}" || exit 4
 test "$CONTAINERS_CONF" = "$EXPECTED_CONTAINERS_CONF" || exit 5
 test "$CONTAINERS_CONF_OVERRIDE" != "$CONTAINERS_CONF" || exit 6
 {
   IFS= read -r section
   IFS= read -r devices
+  IFS= read -r engine
+  IFS= read -r hooks
 } < "$CONTAINERS_CONF_OVERRIDE" || exit 7
 test "$section" = '[containers]' || exit 8
 test "$devices" = 'devices = [{append = false}]' || exit 9
+test "$engine" = '[engine]' || exit 10
+test "$hooks" = 'hooks_dir = [{append = false}]' || exit 11
 printf 'result'
 printf 'diagnostic' >&2
 test "$3" != fail
@@ -481,9 +524,10 @@ test "$3" != fail
 	for _, key := range []string{"CONTAINER_HOST", "CONTAINER_CONNECTION", "CONTAINER_SSHKEY", "DOCKER_HOST"} {
 		t.Setenv(key, "remote-secret")
 	}
+	t.Setenv("NOTIFY_SOCKET", filepath.Join(dir, "notify.sock"))
 	// Preserve the host engine config but replace its last-loaded override.
 	hostConfig := filepath.Join(dir, "containers.conf")
-	if err := os.WriteFile(hostConfig, []byte("[containers]\ndevices = [\"/dev/null:/dev/host-device:rwm\", {append = true}]\n"), 0600); err != nil {
+	if err := os.WriteFile(hostConfig, []byte("[containers]\ndevices = [\"/dev/null:/dev/host-device:rwm\", {append = true}]\n[engine]\nhooks_dir = [\"/host/hooks.d\", {append = true}]\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CONTAINERS_CONF", hostConfig)

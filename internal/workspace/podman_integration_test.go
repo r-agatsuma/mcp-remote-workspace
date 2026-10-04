@@ -2,6 +2,9 @@ package workspace
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,14 +18,44 @@ func TestRootlessPodmanIntegration(t *testing.T) {
 	if os.Getenv("MCP_WORKSPACE_PODMAN_TEST") != "1" {
 		t.Skip("set MCP_WORKSPACE_PODMAN_TEST=1 on a prepared rootless Podman host")
 	}
-	// Default rootless devices are hidden from ordinary inspect. Verify the
-	// last-loaded service override clears them even with append enabled.
-	hostConfig := filepath.Join(t.TempDir(), "containers.conf")
-	if err := os.WriteFile(hostConfig, []byte("[containers]\ndevices = [\"/dev/null:/dev/workspace-forbidden-device:rwm\", {append = true}]\n"), 0600); err != nil {
+	// Host defaults can add hidden devices or run hooks after inspection.
+	// A selected precreate hook would mark its invocation and prevent startup.
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "hooks.d")
+	if err := os.Mkdir(hooksDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	hookMarker := filepath.Join(dir, "hook-invoked")
+	hook, err := json.Marshal(map[string]any{
+		"version": "1.0.0",
+		"hook": map[string]any{
+			"path": "/bin/sh",
+			"args": []string{"/bin/sh", "-ec", `printf invoked > "$1"; exit 1`, "workspace-hook", hookMarker},
+		},
+		"when":   map[string]any{"always": true},
+		"stages": []string{"precreate"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "workspace-forbidden.json"), hook, 0600); err != nil {
+		t.Fatal(err)
+	}
+	hostConfig := filepath.Join(dir, "containers.conf")
+	config := fmt.Sprintf("[containers]\ndevices = [\"/dev/null:/dev/workspace-forbidden-device:rwm\", {append = true}]\n[engine]\nhooks_dir = [%q, {append = true}]\n", hooksDir)
+	if err := os.WriteFile(hostConfig, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CONTAINERS_CONF", hostConfig)
 	t.Setenv("CONTAINERS_CONF_OVERRIDE", hostConfig)
+	// Emulate a service launched with a real systemd notification socket.
+	notifyPath := filepath.Join(dir, "notify.sock")
+	notify, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: notifyPath, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { notify.Close() })
+	t.Setenv("NOTIFY_SOCKET", notifyPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	p, err := NewPodman(ctx)
@@ -48,6 +81,9 @@ func TestRootlessPodmanIntegration(t *testing.T) {
 	if len(recovered.workspaces) != before+1 || recovered.workspaces[w.ID].Workspace != w {
 		t.Fatal("create/recovery did not preserve exactly one workspace")
 	}
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("host OCI hook was invoked or marker could not be checked: %v", err)
+	}
 	id := recovered.workspaces[w.ID].containerID
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -60,6 +96,8 @@ test ! -e "$1"
 test ! -e /var/run/docker.sock
 test ! -e /run/podman/podman.sock
 test ! -e /run/secrets
+test ! -e /run/notify
+test -z "${NOTIFY_SOCKET+x}"
 test ! -e /dev/workspace-forbidden-device
 test -z "$(find /run /var/run -type s -print -quit)"
 touch /workspace/writable

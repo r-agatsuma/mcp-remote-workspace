@@ -59,14 +59,14 @@ func runPodman(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	// Rootless default devices become OCI bind mounts that ordinary inspect
-	// does not expose. Clear them in the last-loaded config, including when a
-	// host config has enabled array appending. Keep other host engine settings.
+	// does not expose. OCI precreate hooks can change the spec after inspection.
+	// Clear both in the last-loaded config, even with host array appending enabled.
 	config, err := os.CreateTemp("", "mcp-workspace-containers-*.conf")
 	if err != nil {
 		return nil, fmt.Errorf("create Podman config override: %w", err)
 	}
 	defer os.Remove(config.Name())
-	_, writeErr := config.WriteString("[containers]\ndevices = [{append = false}]\n")
+	_, writeErr := config.WriteString("[containers]\ndevices = [{append = false}]\n[engine]\nhooks_dir = [{append = false}]\n")
 	closeErr := config.Close()
 	if err := errors.Join(writeErr, closeErr); err != nil {
 		return nil, fmt.Errorf("write Podman config override: %w", err)
@@ -76,7 +76,7 @@ func runPodman(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "podman", append([]string{"--remote=false", "--default-mounts-file=/dev/null"}, args...)...)
 	for _, env := range os.Environ() {
 		key, _, _ := strings.Cut(env, "=")
-		if key != "CONTAINER_HOST" && key != "CONTAINER_CONNECTION" && key != "CONTAINER_SSHKEY" && key != "DOCKER_HOST" && key != "CONTAINERS_CONF_OVERRIDE" {
+		if key != "CONTAINER_HOST" && key != "CONTAINER_CONNECTION" && key != "CONTAINER_SSHKEY" && key != "DOCKER_HOST" && key != "CONTAINERS_CONF_OVERRIDE" && key != "NOTIFY_SOCKET" {
 			cmd.Env = append(cmd.Env, env)
 		}
 	}
@@ -156,7 +156,7 @@ func (p *Podman) Create(ctx context.Context) (Workspace, error) {
 		"--userns=nomap", "--user=0:0", "--pid=private", "--ipc=private", "--uts=private",
 		"--network=slirp4netns:allow_host_loopback=false", "--cgroups=enabled", "--cgroupns=private",
 		"--cpu-period=100000", "--cpu-quota=200000", "--memory=1073741824", "--memory-swap=1073741824", "--pids-limit=256",
-		"--image-volume=ignore", "--http-proxy=false", "--unsetenv-all",
+		"--image-volume=ignore", "--http-proxy=false", "--unsetenv-all", "--sdnotify=ignore",
 		"--env=HOME=/root", "--env=PATH=" + containerPath,
 		"--workdir=/workspace", "--entrypoint=/usr/bin/sleep", Image, "infinity",
 	}
