@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/r-agatsuma/mcp-remote-workspace/internal/control"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -51,11 +52,36 @@ type Manager struct {
 	entries      map[string]*entry
 	destroyed    map[string]bool
 	maxTextBytes int64
+	// A raw descriptor has no Go finalizer. After successful startup only OS
+	// process exit releases it, even if serving returns or this Manager is GC'd.
+	daemonLock int
 }
 
-// New is also the restart boundary: invalid labels, duplicate IDs, or drifted
-// profiles fail startup without mutating any existing containers.
+// New acquires production daemon exclusivity before discovery or recovery.
+// Invalid labels, duplicate IDs, or drifted profiles fail startup without
+// mutating any existing containers. Successful startup holds the process lock
+// until process exit; a second Manager using a production runner is rejected.
 func New(ctx context.Context, runner Runner) (*Manager, error) {
+	fd := -1
+	if locker, ok := runner.(daemonLocker); ok {
+		var err error
+		fd, err = locker.acquireDaemonLock()
+		if err != nil {
+			return nil, err
+		}
+	}
+	m, err := recoverManager(ctx, runner)
+	if err != nil {
+		if fd >= 0 {
+			unix.Close(fd) // No serving Manager exists after failed startup.
+		}
+		return nil, err
+	}
+	m.daemonLock = fd
+	return m, nil
+}
+
+func recoverManager(ctx context.Context, runner Runner) (*Manager, error) {
 	m := &Manager{runner: runner, entries: make(map[string]*entry), destroyed: make(map[string]bool), maxTextBytes: control.DefaultTextLimit}
 	data, err := runner.Run(ctx, "info", "--format=json")
 	if err != nil {

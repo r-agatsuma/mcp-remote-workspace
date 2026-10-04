@@ -185,24 +185,20 @@ open('/etc/mcp-rootfs-preserved','w').write('installed state')
 			t.Fatal("reset recreated container")
 		}
 	})
-	restarted, err := New(ctx, p)
-	if err != nil {
+	if _, err := New(ctx, p); !errors.Is(err, ErrDaemonActive) {
+		t.Fatalf("second manager accepted during daemon lifetime: %v", err)
+	}
+	if err := m.Destroy(ctx, w.ID); err != nil {
 		t.Fatal(err)
 	}
-	if recovered := restarted.entries[w.ID]; recovered == nil || !recovered.CreatedAt.Equal(w.CreatedAt) {
-		t.Fatal("restart lost workspace ID")
-	}
-	if err := restarted.Destroy(ctx, w.ID); err != nil {
-		t.Fatal(err)
-	}
-	ids, err := restarted.discover(ctx, w.ID)
+	ids, err := m.discover(ctx, w.ID)
 	if err != nil || len(ids) != 0 {
 		t.Fatalf("destroy left compute: %v, %v", ids, err)
 	}
-	if err := restarted.Destroy(ctx, w.ID); err != nil {
+	if err := m.Destroy(ctx, w.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := restarted.Destroy(ctx, "unknown"); !errors.Is(err, ErrNotFound) {
+	if err := m.Destroy(ctx, "unknown"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown ID: %v", err)
 	}
 }

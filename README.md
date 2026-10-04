@@ -134,6 +134,17 @@ System/user containers.conf files, config overrides, and remote connections do
 not participate in workspace creation. This relies on Podman's documented
 [CONTAINERS_CONF semantics](https://github.com/containers/common/blob/v0.62.3/docs/containers.conf.5.md#environment-variables).
 
+v0 permits one active daemon per service account/runtime profile. Before any
+Podman command, including workspace discovery and startup recovery, it acquires
+a non-blocking exclusive `flock` on the private service-owned
+`/run/user/UID/mcp-workspaced-v0/daemon.lock` file. A second daemon (or production
+Manager) fails startup before accessing managed containers or volumes. The lock
+is retained for the entire process lifetime and released by the OS on exit or
+crash; it is not inherited by Podman children. The lock file persists and is never
+removed or replaced by the daemon. No stale-PID repair, lock stealing, takeover
+timeout, or cross-process per-workspace locking is supported. In-memory operation
+locks serialize operations inside this singleton daemon.
+
 The Podman process environment is constructed from fixed PATH/LANG, the service
 account's home from the account database, the UID-derived runtime directory,
 the project config directory, and a UID-derived D-Bus address required by systemd
@@ -225,7 +236,7 @@ test (it creates and removes one test workspace, checks actual resource limits,
 writes/reads/executes a trivial program, checks timeouts/output limits and path
 escapes, exercises daemonized descendants, helper death and cancelled file
 transport recovery, tampers with Python/startup hooks/sleep, probes isolation
-and outbound HTTPS, and tests rediscovery):
+and outbound HTTPS, and checks refusal of a second Manager):
 
 ```sh
 MCP_WORKSPACE_INTEGRATION=1 go test ./internal/workspace \
