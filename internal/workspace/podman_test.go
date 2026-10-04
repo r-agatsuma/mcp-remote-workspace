@@ -32,7 +32,14 @@ func (f *fakePodman) run(_ context.Context, args ...string) ([]byte, error) {
 	case "ps":
 		var ids []string
 		for id, c := range f.containers {
-			if c.Config.Labels[managedLabel] == "true" {
+			matches := c.Config.Labels[managedLabel] == "true"
+			for _, arg := range args {
+				if label, ok := strings.CutPrefix(arg, "--filter=label="); ok {
+					key, value, _ := strings.Cut(label, "=")
+					matches = matches && c.Config.Labels[key] == value
+				}
+			}
+			if matches {
 				ids = append(ids, id)
 			}
 		}
@@ -277,6 +284,100 @@ func TestStartupRejectsUnsafeRuntime(t *testing.T) {
 	}
 }
 
+func TestInterruptedCreateRollback(t *testing.T) {
+	for _, failure := range []string{"command error", "canceled", "timeout", "invalid ID"} {
+		for _, cleanupFailure := range []string{"", "ps", "rm"} {
+			t.Run(failure+"/cleanup="+cleanupFailure, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				// An unrelated managed workspace must survive cleanup.
+				otherID := strings.Repeat("b", 64)
+				f := &fakePodman{containers: map[string]container{otherID: safeContainer(otherID)}}
+				p, err := newPodman(ctx, f.run)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cause := errors.New("create failed after persistence")
+				if failure == "canceled" {
+					cause = context.Canceled
+				}
+				if failure == "timeout" {
+					cause = context.DeadlineExceeded
+				}
+				var attemptedID string
+				p.run = func(callCtx context.Context, args ...string) ([]byte, error) {
+					if args[0] == "create" {
+						if _, err := f.run(callCtx, args...); err != nil {
+							t.Fatal(err)
+						}
+						for _, arg := range args {
+							if value, ok := strings.CutPrefix(arg, "--label="+idLabel+"="); ok {
+								attemptedID = value
+							}
+						}
+						f.fail = cleanupFailure
+						if failure == "canceled" || failure == "timeout" {
+							cancel()
+						}
+						if failure == "invalid ID" {
+							// Never use untrusted stdout as a removal argument.
+							return []byte(otherID + "\n--all"), nil
+						}
+						return nil, cause
+					}
+					if callCtx.Err() != nil {
+						t.Fatalf("cleanup inherited cancellation: %v", callCtx.Err())
+					}
+					if _, ok := callCtx.Deadline(); !ok {
+						t.Fatal("cleanup has no deadline")
+					}
+					return f.run(callCtx, args...)
+				}
+				w, err := p.Create(ctx)
+				if err == nil || w.ID != "" {
+					t.Fatalf("create: %#v, %v", w, err)
+				}
+				if failure != "invalid ID" && !errors.Is(err, cause) {
+					t.Fatalf("lost original error: %v", err)
+				}
+				if _, exists := f.containers[otherID]; !exists {
+					t.Fatal("cleanup removed unrelated workspace")
+				}
+				creates := 0
+				for _, call := range f.calls {
+					if call[0] == "create" {
+						creates++
+					}
+				}
+				if creates != 1 {
+					t.Fatalf("create calls = %d", creates)
+				}
+				if cleanupFailure == "" {
+					if len(f.containers) != 1 || len(p.workspaces) != 1 {
+						t.Fatal("interrupted create left runtime state")
+					}
+					return
+				}
+				if !strings.Contains(err.Error(), "rollback failed") || !strings.Contains(err.Error(), attemptedID) {
+					t.Fatalf("missing actionable rollback diagnostic: %v", err)
+				}
+				if len(f.containers) != 2 || len(p.workspaces) != 2 {
+					t.Fatal("failed cleanup lost workspace state")
+				}
+				// A later explicit destroy can resolve even a failed lookup.
+				f.fail = ""
+				p.run = f.run
+				if err := p.Destroy(context.Background(), attemptedID); err != nil {
+					t.Fatal(err)
+				}
+				if len(f.containers) != 1 || len(p.workspaces) != 1 {
+					t.Fatal("destroy left interrupted-create state")
+				}
+			})
+		}
+	}
+}
+
 func TestIsolationRejectedBeforeStartAndOnRecovery(t *testing.T) {
 	cases := map[string]func(*container){
 		"host home mount": func(c *container) {
@@ -361,6 +462,14 @@ func TestCommandBoundary(t *testing.T) {
 test "$1" = --remote=false || exit 2
 test "$2" = --default-mounts-file=/dev/null || exit 3
 test -z "$CONTAINER_HOST$CONTAINER_CONNECTION$CONTAINER_SSHKEY$DOCKER_HOST" || exit 4
+test "$CONTAINERS_CONF" = "$EXPECTED_CONTAINERS_CONF" || exit 5
+test "$CONTAINERS_CONF_OVERRIDE" != "$CONTAINERS_CONF" || exit 6
+{
+  IFS= read -r section
+  IFS= read -r devices
+} < "$CONTAINERS_CONF_OVERRIDE" || exit 7
+test "$section" = '[containers]' || exit 8
+test "$devices" = 'devices = [{append = false}]' || exit 9
 printf 'result'
 printf 'diagnostic' >&2
 test "$3" != fail
@@ -372,6 +481,14 @@ test "$3" != fail
 	for _, key := range []string{"CONTAINER_HOST", "CONTAINER_CONNECTION", "CONTAINER_SSHKEY", "DOCKER_HOST"} {
 		t.Setenv(key, "remote-secret")
 	}
+	// Preserve the host engine config but replace its last-loaded override.
+	hostConfig := filepath.Join(dir, "containers.conf")
+	if err := os.WriteFile(hostConfig, []byte("[containers]\ndevices = [\"/dev/null:/dev/host-device:rwm\", {append = true}]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONTAINERS_CONF", hostConfig)
+	t.Setenv("EXPECTED_CONTAINERS_CONF", hostConfig)
+	t.Setenv("CONTAINERS_CONF_OVERRIDE", hostConfig)
 	data, err := runPodman(context.Background(), "info")
 	if err != nil || string(data) != "result" {
 		t.Fatalf("command output = %q, error = %v", data, err)

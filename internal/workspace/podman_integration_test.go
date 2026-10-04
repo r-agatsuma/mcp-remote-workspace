@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,14 @@ func TestRootlessPodmanIntegration(t *testing.T) {
 	if os.Getenv("MCP_WORKSPACE_PODMAN_TEST") != "1" {
 		t.Skip("set MCP_WORKSPACE_PODMAN_TEST=1 on a prepared rootless Podman host")
 	}
+	// Default rootless devices are hidden from ordinary inspect. Verify the
+	// last-loaded service override clears them even with append enabled.
+	hostConfig := filepath.Join(t.TempDir(), "containers.conf")
+	if err := os.WriteFile(hostConfig, []byte("[containers]\ndevices = [\"/dev/null:/dev/workspace-forbidden-device:rwm\", {append = true}]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONTAINERS_CONF", hostConfig)
+	t.Setenv("CONTAINERS_CONF_OVERRIDE", hostConfig)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	p, err := NewPodman(ctx)
@@ -51,6 +60,7 @@ test ! -e "$1"
 test ! -e /var/run/docker.sock
 test ! -e /run/podman/podman.sock
 test ! -e /run/secrets
+test ! -e /dev/workspace-forbidden-device
 test -z "$(find /run /var/run -type s -print -quit)"
 touch /workspace/writable
 for tool in curl git jq rg patch make gcc g++ python3; do command -v "$tool"; done

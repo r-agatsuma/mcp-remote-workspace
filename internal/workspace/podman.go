@@ -58,15 +58,29 @@ func NewPodman(ctx context.Context) (*Podman, error) {
 func runPodman(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	// Rootless default devices become OCI bind mounts that ordinary inspect
+	// does not expose. Clear them in the last-loaded config, including when a
+	// host config has enabled array appending. Keep other host engine settings.
+	config, err := os.CreateTemp("", "mcp-workspace-containers-*.conf")
+	if err != nil {
+		return nil, fmt.Errorf("create Podman config override: %w", err)
+	}
+	defer os.Remove(config.Name())
+	_, writeErr := config.WriteString("[containers]\ndevices = [{append = false}]\n")
+	closeErr := config.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return nil, fmt.Errorf("write Podman config override: %w", err)
+	}
 	// Explicitly override remote connection environment/configuration. Never
 	// invoke a shell, sudo, or a container-engine API socket.
 	cmd := exec.CommandContext(ctx, "podman", append([]string{"--remote=false", "--default-mounts-file=/dev/null"}, args...)...)
 	for _, env := range os.Environ() {
 		key, _, _ := strings.Cut(env, "=")
-		if key != "CONTAINER_HOST" && key != "CONTAINER_CONNECTION" && key != "CONTAINER_SSHKEY" && key != "DOCKER_HOST" {
+		if key != "CONTAINER_HOST" && key != "CONTAINER_CONNECTION" && key != "CONTAINER_SSHKEY" && key != "DOCKER_HOST" && key != "CONTAINERS_CONF_OVERRIDE" {
 			cmd.Env = append(cmd.Env, env)
 		}
 	}
+	cmd.Env = append(cmd.Env, "CONTAINERS_CONF_OVERRIDE="+config.Name())
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -148,11 +162,13 @@ func (p *Podman) Create(ctx context.Context) (Workspace, error) {
 	}
 	data, err := p.run(ctx, args...)
 	if err != nil {
-		return Workspace{}, err
+		p.workspaces[w.ID] = record{Workspace: w}
+		return Workspace{}, p.rollbackCreate(ctx, w.ID, err)
 	}
 	id := strings.TrimSpace(string(data))
 	if !containerIDPattern.MatchString(id) {
-		return Workspace{}, errors.New("invalid created container ID")
+		p.workspaces[w.ID] = record{Workspace: w}
+		return Workspace{}, p.rollbackCreate(ctx, w.ID, errors.New("invalid created container ID"))
 	}
 	// Record even an incompletely started workspace so its managed state is
 	// recoverable. Failure handling does not retry Podman commands.
@@ -168,17 +184,56 @@ func (p *Podman) Create(ctx context.Context) (Workspace, error) {
 		_, err = p.run(ctx, "start", id)
 	}
 	if err != nil {
-		// Remove only the container just created by this operation, including
-		// its writable layer. A canceled request must not cancel rollback.
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		if _, cleanupErr := p.run(cleanupCtx, "rm", "--force", "--ignore", "--volumes", id); cleanupErr != nil {
-			return Workspace{}, fmt.Errorf("create workspace %s: %w; rollback failed: %v", w.ID, err, cleanupErr)
-		}
-		delete(p.workspaces, w.ID)
-		return Workspace{}, err
+		return Workspace{}, p.rollbackCreate(ctx, w.ID, err)
 	}
 	return w, nil
+}
+
+// Resolve an interrupted create by its exact labels rather than trusting its
+// stdout or deleting a container that merely has the expected name.
+func (p *Podman) resolveContainer(ctx context.Context, w record) (string, error) {
+	if w.containerID != "" {
+		return w.containerID, nil
+	}
+	data, err := p.run(ctx, "ps", "--all", "--no-trunc",
+		"--filter=label="+managedLabel+"=true",
+		"--filter=label="+idLabel+"="+w.ID,
+		"--filter=label="+createdLabel+"="+w.CreatedAt.Format(time.RFC3339Nano), "--format={{.ID}}")
+	if err != nil {
+		return "", err
+	}
+	ids := strings.Fields(string(data))
+	if len(ids) == 0 {
+		return "", nil
+	}
+	if len(ids) != 1 || !containerIDPattern.MatchString(ids[0]) {
+		return "", errors.New("unexpected interrupted-create container list")
+	}
+	w.containerID = ids[0]
+	p.workspaces[w.ID] = w
+	return ids[0], nil
+}
+
+func (p *Podman) rollbackCreate(ctx context.Context, id string, cause error) error {
+	// A canceled request must not cancel discovery or removal. On failure keep
+	// the handle so a subsequent explicit destroy can resolve and remove it.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := p.removeContainer(cleanupCtx, p.workspaces[id]); err != nil {
+		return fmt.Errorf("create workspace %s: %w; rollback failed: %v", id, cause, err)
+	}
+	delete(p.workspaces, id)
+	return cause
+}
+
+func (p *Podman) removeContainer(ctx context.Context, w record) error {
+	id, err := p.resolveContainer(ctx, w)
+	if err != nil || id == "" {
+		return err
+	}
+	// --force stops a running container; --ignore tolerates external removal.
+	_, err = p.run(ctx, "rm", "--force", "--ignore", "--volumes", id)
+	return err
 }
 
 func (p *Podman) Destroy(ctx context.Context, id string) error {
@@ -191,8 +246,7 @@ func (p *Podman) Destroy(ctx context.Context, id string) error {
 	if !exists {
 		return ErrNotFound
 	}
-	// --force stops a running container; --ignore tolerates external removal.
-	if _, err := p.run(ctx, "rm", "--force", "--ignore", "--volumes", w.containerID); err != nil {
+	if err := p.removeContainer(ctx, w); err != nil {
 		return err
 	}
 	delete(p.workspaces, id)

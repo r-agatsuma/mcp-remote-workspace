@@ -66,6 +66,12 @@ inside, private PID/IPC namespaces, and slirp4netns for outbound networking.
 It drops all capabilities and enables no-new-privileges. No host directories,
 devices, engine sockets or credentials are passed into the container; automatic
 mounts from mounts.conf and host proxy environment forwarding are disabled.
+Each Podman command uses a service-owned, last-loaded containers.conf override
+that clears default devices, including configurations with array appending
+enabled. Other host engine settings are preserved. This prevents rootless
+device bind mounts that ordinary container inspect does not expose.
+See the [containers.conf documentation](https://github.com/containers/common/blob/v0.62.2/docs/containers.conf.5.md)
+for configuration precedence and array replacement.
 The effective container configuration is inspected before starting and on
 recovery; incompatible host defaults cause an error instead of weakening the
 profile. See the [Podman create documentation](https://docs.podman.io/en/v5.4.2/markdown/podman-create.1.html)
@@ -81,8 +87,11 @@ Successful duplicate destroys are idempotent during one server lifetime.
 After restart, IDs of already removed workspaces, and other unknown IDs, return
 `workspace_not_found`. Podman operation failures return `backend_error`; a failed
 destroy keeps its mapping so a later request can try again. A failed inspection
-or start removes only the container created by that request; rollback failure
-reports the workspace handle and retains its mapping.
+or start removes only the container created by that request. An interrupted
+create or invalid container ID output also triggers cleanup, discovering the
+container by the request's exact labels with a context independent of request
+cancellation. Rollback failure reports the workspace handle and retains its
+mapping so a later destroy can finish discovery and removal.
 
 This service is not a generic remote shell. Host process execution, GitHub
 authentication/commit/PR operations, private repository cloning, arbitrary runtime
