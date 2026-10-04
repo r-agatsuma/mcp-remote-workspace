@@ -16,11 +16,15 @@ import (
 )
 
 func connect(t *testing.T) (context.Context, *mcp.ClientSession) {
+	return connectLifecycle(t, nil)
+}
+
+func connectLifecycle(t *testing.T, backend Lifecycle) (context.Context, *mcp.ClientSession) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	server, err := New().Connect(ctx, serverTransport, nil)
+	server, err := New(backend).Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +199,7 @@ func TestInvalidArguments(t *testing.T) {
 	// Reject fields that could otherwise expand the service's execution boundary.
 	for _, field := range []string{"image", "mount", "device", "capability", "network_mode", "podman_options", "shell"} {
 		cases = append(cases, struct{ name, args string }{"exec", `{"workspace_id":"ws","argv":["go"],"` + field + `":"unexpected"}`})
+		cases = append(cases, struct{ name, args string }{"workspace_create", `{"` + field + `":"unexpected"}`})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+tc.args, func(t *testing.T) {

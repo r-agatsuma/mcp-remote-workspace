@@ -3,24 +3,53 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
 	"os/exec"
-	"path/filepath"
+	"os/signal"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/r-agatsuma/mcp-remote-workspace/internal/workspace"
 )
+
+type testLifecycle struct{}
+
+func (testLifecycle) Create(context.Context) (workspace.Workspace, error) {
+	return workspace.Workspace{}, errors.New("test backend unavailable")
+}
+func (testLifecycle) Destroy(context.Context, string) error { return workspace.ErrNotFound }
+
+// Exercise the real stdio serving path in a subprocess while mocking the
+// backend, so normal tests need neither Podman nor a prepared service account.
+func TestStdioHelperProcess(t *testing.T) {
+	if os.Getenv("MCP_STDIO_TEST") != "1" {
+		return
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := serve(ctx, testLifecycle{}); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
 
 func TestStdioLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	binary := filepath.Join(t.TempDir(), "mcp-workspaced")
-	if output, err := exec.CommandContext(ctx, "go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, output)
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := func() *exec.Cmd {
+		cmd := exec.CommandContext(ctx, binary, "-test.run=^TestStdioHelperProcess$")
+		cmd.Env = append(os.Environ(), "MCP_STDIO_TEST=1")
+		return cmd
 	}
 	t.Run("EOF before initialization", func(t *testing.T) {
-		cmd := exec.CommandContext(ctx, binary)
+		cmd := command()
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		if err := cmd.Run(); err != nil {
@@ -32,7 +61,7 @@ func TestStdioLifecycle(t *testing.T) {
 	})
 	for _, shutdown := range []string{"EOF after initialization", "SIGTERM", "SIGINT"} {
 		t.Run(shutdown, func(t *testing.T) {
-			cmd := exec.CommandContext(ctx, binary)
+			cmd := command()
 			stdin, err := cmd.StdinPipe()
 			if err != nil {
 				t.Fatal(err)

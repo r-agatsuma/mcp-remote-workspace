@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/r-agatsuma/mcp-remote-workspace/internal/mcpserver"
+	"github.com/r-agatsuma/mcp-remote-workspace/internal/workspace"
 )
 
 func main() {
@@ -22,7 +23,15 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	err := mcpserver.New().Run(ctx, &mcp.StdioTransport{})
+	backend, err := workspace.Open(ctx)
+	if err != nil {
+		return err
+	}
+	return serve(ctx, backend)
+}
+
+func serve(ctx context.Context, backend mcpserver.Lifecycle) error {
+	err := mcpserver.New(backend).Run(ctx, &mcp.StdioTransport{})
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
