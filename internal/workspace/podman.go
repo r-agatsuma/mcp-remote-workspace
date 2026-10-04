@@ -147,19 +147,24 @@ func (p *podman) Run(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 type limitedBuffer struct {
-	bytes.Buffer
+	// Keep the buffer private: embedding it promotes ReadFrom, which lets
+	// io.Copy (including os/exec's output copying) bypass the bounded Write.
+	buffer   bytes.Buffer
 	limit    int64
 	overflow bool
 }
 
+func (b *limitedBuffer) Bytes() []byte  { return b.buffer.Bytes() }
+func (b *limitedBuffer) String() string { return b.buffer.String() }
+
 func (b *limitedBuffer) Write(data []byte) (int, error) {
 	n := len(data)
-	remaining := b.limit - int64(b.Len())
+	remaining := b.limit - int64(b.buffer.Len())
 	if int64(len(data)) > remaining {
 		b.overflow = true
 		data = data[:int(remaining)]
 	}
-	_, _ = b.Buffer.Write(data)
+	_, _ = b.buffer.Write(data)
 	return n, nil
 }
 
