@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-var ErrAbsoluteTTL = errors.New("generation absolute TTL has expired")
+var (
+	ErrAbsoluteTTL = errors.New("generation absolute TTL has expired")
+	ErrIdleTTL     = errors.New("generation idle TTL has expired")
+)
 
 func (s *Service) expired(e Exact, now time.Time) bool {
 	life, ok := s.lifetimes[e]
@@ -169,7 +172,9 @@ func (s *Service) accountRuntime(permit *BackendPermit, err error) error {
 
 // BeginBackend supplies the same global budget to later exec/build paths.
 // The caller must resolve only on definite backend completion, independently
-// of request cancellation. No activity is inferred from backend lifetime.
+// of request cancellation. Idle- or absolute-expired generations cannot begin
+// new work. Admitted MCP activity must be recorded separately via AdmitActivity;
+// no activity is inferred from backend admission or lifetime.
 func (s *Service) BeginBackend(e Exact, kind string) (BackendOperation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -185,8 +190,12 @@ func (s *Service) BeginBackend(e Exact, kind string) (BackendOperation, error) {
 	if s.entries[e.Workspace] != e {
 		return BackendOperation{}, ErrStaleGeneration
 	}
-	if !s.now().Before(s.lifetimes[e].Created.Add(s.policy.AbsoluteTTL)) {
+	life, now := s.lifetimes[e], s.now()
+	if !now.Before(life.Created.Add(s.policy.AbsoluteTTL)) {
 		return BackendOperation{}, ErrAbsoluteTTL
+	}
+	if !now.Before(life.Activity.Add(s.policy.IdleTTL)) {
+		return BackendOperation{}, ErrIdleTTL
 	}
 	if s.backend.hasLifecycle(e) {
 		return BackendOperation{}, ErrOutcomeUnknown

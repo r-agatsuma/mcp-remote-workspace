@@ -414,6 +414,86 @@ func TestTTLRevalidatesHintAndExactGeneration(t *testing.T) {
 	}
 }
 
+func TestBeginBackendTTLAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		elapsed    time.Duration
+		activityAt time.Duration
+		want       error
+	}{
+		{"before-idle-deadline", time.Minute - time.Nanosecond, 0, nil},
+		{"at-idle-deadline", time.Minute, 0, ErrIdleTTL},
+		{"after-idle-deadline", time.Minute + time.Nanosecond, 0, ErrIdleTTL},
+		{"admitted-activity-refreshed-idle", time.Minute, time.Minute / 2, nil},
+		{"at-refreshed-idle-deadline", 90 * time.Second, time.Minute / 2, ErrIdleTTL},
+		{"absolute-deadline-with-recent-activity", 3 * time.Minute, 150 * time.Second, ErrAbsoluteTTL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			now := start
+			p := ReferencePolicy()
+			p.IdleTTL, p.AbsoluteTTL = time.Minute, 3*time.Minute
+			s, _, _ := openControlled(t, newFake(), Config{Policy: &p, Clock: func() time.Time { return now }})
+			i := identity(t, "s", "c")
+			e, err := s.Create(context.Background(), i)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.activityAt != 0 {
+				now = start.Add(tc.activityAt)
+				if err := s.AdmitActivity(i, e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			life, counter := s.lifetimes[e], s.backend.state().Next
+			now = start.Add(tc.elapsed)
+			op, err := s.BeginBackend(e, "build")
+			if tc.want == nil {
+				if err != nil || op.Exact != e || len(s.PendingBackend()) != 1 {
+					t.Fatalf("unexpired backend work rejected: operation=%+v err=%v", op, err)
+				}
+			} else if !errors.Is(err, tc.want) || op != (BackendOperation{}) || len(s.PendingBackend()) != 0 || s.backend.state().Next != counter {
+				t.Fatalf("expired backend admission changed accounting: operation=%+v err=%v pending=%v", op, err, s.PendingBackend())
+			}
+			if s.lifetimes[e] != life {
+				t.Fatal("backend admission refreshed generation lifetime")
+			}
+		})
+	}
+}
+
+func TestBeginBackendIdleExpiryRetainsPendingWork(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	p := ReferencePolicy()
+	p.IdleTTL = time.Minute
+	s, _, _ := openControlled(t, newFake(), Config{Policy: &p, Clock: func() time.Time { return now }})
+	i := identity(t, "s", "c")
+	e, err := s.Create(context.Background(), i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := s.BeginBackend(e, "detached")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(p.IdleTTL)
+	if _, err := s.BeginBackend(e, "build"); !errors.Is(err, ErrIdleTTL) {
+		t.Fatal("idle-expired generation admitted new work", err)
+	}
+	if pending := s.PendingBackend(); len(pending) != 1 || pending[0] != op {
+		t.Fatal("idle expiry released pending work", pending)
+	}
+	if err := s.CleanupExpired(context.Background(), e); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatal("cleanup ignored pending work", err)
+	}
+	if err := s.RecoverBackend(op, DefinitelyCompleted); err != nil {
+		t.Fatal("expired backend work could not be recovered", err)
+	}
+	if err := s.CleanupExpired(context.Background(), e); err != nil {
+		t.Fatal("backend recovery prevented TTL cleanup", err)
+	}
+}
+
 func TestTTLAbsoluteDetachedAndRestart(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	p := ReferencePolicy()

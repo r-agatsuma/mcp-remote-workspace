@@ -104,7 +104,10 @@ Creation and last admitted MCP activity are journaled per exact generation.
 submission also refresh idle activity. Status reads, detached workload activity,
 backend completion/recovery and runtime probes alone do not refresh it. Absolute
 creation time never changes. Process submission also rechecks absolute expiry
-after its probe. `BeginBackend` rejects absolute-expired generations.
+after its probe. `BeginBackend` rejects idle- or absolute-expired generations
+before reserving a permit and does not refresh activity itself. Consumers must
+record admitted MCP activity separately with `AdmitActivity`. Expiry does not
+release existing backend permits or prevent their exact-operation recovery.
 
 `ExpiredGenerations` returns hints only. `CleanupExpired` compares exact current
 intent and rereads current activity under the lifecycle lock before cleanup.
