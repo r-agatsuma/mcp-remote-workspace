@@ -117,13 +117,41 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 	o := fakeObject(e)
 	create := []string{"container", "create", "--pull=never", "--name", objectName(e),
 		"--network=none", "--image-volume=ignore", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--memory=4294967296", "--memory-swap=4294967296", "--cpu-quota=-1", "--cgroup-conf=cpu.weight=100", "--pids-limit=512", "--ulimit=nofile=1024:1024",
 		"--label", generationLabel + "=" + string(e.Generation),
 		"--label", imageLabel + "=" + testImage,
 		"--label", ownerLabel + "=" + ownerValue,
 		"--label", workspaceLabel + "=" + string(e.Workspace), "--", testImage}
-	for _, mode := range []string{"success", "create-error", "invalid-create-id", "mismatched-created-object", "start-error"} {
+	for _, mode := range []string{"success", "custom-policy", "create-error", "invalid-create-id", "mismatched-created-object", "start-error"} {
 		t.Run(mode, func(t *testing.T) {
-			steps := []commandStep{infoStep(), {args: create, output: o.ID + "\n"}}
+			args := append([]string(nil), create...)
+			policy := ReferencePolicy()
+			if mode == "custom-policy" {
+				policy.MemoryBytes = 2 << 30
+				policy.SwapBytes = 1 << 30
+				policy.CPUWeight = 200
+				policy.CPUQuota = 50000
+				policy.PIDsMax = 64
+				policy.MigrationTasksMax = 65
+				policy.NoFile = 256
+				for n, arg := range args {
+					switch arg {
+					case "--memory=4294967296":
+						args[n] = "--memory=2147483648"
+					case "--memory-swap=4294967296":
+						args[n] = "--memory-swap=3221225472"
+					case "--cpu-quota=-1":
+						args[n] = "--cpu-quota=50000"
+					case "--cgroup-conf=cpu.weight=100":
+						args[n] = "--cgroup-conf=cpu.weight=200"
+					case "--pids-limit=512":
+						args[n] = "--pids-limit=64"
+					case "--ulimit=nofile=1024:1024":
+						args[n] = "--ulimit=nofile=256:256"
+					}
+				}
+			}
+			steps := []commandStep{infoStep(), {args: args, output: o.ID + "\n"}}
 			switch mode {
 			case "create-error":
 				steps[1].err = injected
@@ -144,14 +172,15 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 				}
 			}
 			p, _ := podmanStub(t, steps...)
+			p.policy = &policy
 			if err := p.Initialize(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			err := p.Create(context.Background(), e, testImage)
-			if mode == "success" && err != nil {
+			if (mode == "success" || mode == "custom-policy") && err != nil {
 				t.Fatal(err)
 			}
-			if mode != "success" && err == nil {
+			if mode != "success" && mode != "custom-policy" && err == nil {
 				t.Fatal("partial/unrecognized create succeeded")
 			}
 		})

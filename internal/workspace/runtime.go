@@ -24,7 +24,10 @@ type Object struct {
 
 // Runtime is intentionally container-only and exact-generation scoped.
 // Errors may mean that a mutation partially completed. The core must retain
-// intent until absence has been independently confirmed.
+// intent until absence has been independently confirmed. Create/Destroy errors
+// do not attest backend completion unless wrapped in CompletedBackendError.
+// Initialize/List are synchronous, read-only probes with no surviving backend
+// work on return; adapters must wait for their local probe process to exit.
 type Runtime interface {
 	Initialize(context.Context) error
 	List(context.Context) ([]Object, error)

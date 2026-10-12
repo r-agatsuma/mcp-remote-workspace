@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,14 +54,29 @@ type Podman struct {
 	runner      commandRunner
 	image       string
 	initialized bool
+	policy      *Policy
 }
 
 func NewPodman(path, image string) *Podman {
-	return &Podman{runner: localCLI{path}, image: image}
+	return NewPodmanWithPolicy(path, image, ReferencePolicy())
+}
+
+func NewPodmanWithPolicy(path, image string, policy Policy) *Podman {
+	return &Podman{runner: localCLI{path}, image: image, policy: &policy}
+}
+
+func (p *Podman) resourcePolicy() Policy {
+	if p.policy == nil {
+		return ReferencePolicy()
+	}
+	return *p.policy
 }
 
 func (p *Podman) Initialize(ctx context.Context) error {
 	p.initialized = false
+	if err := p.resourcePolicy().Validate(); err != nil {
+		return err
+	}
 	if !validImage(p.image) {
 		return errors.New("digest-pinned canonical image required")
 	}
@@ -176,7 +192,8 @@ func (p *Podman) List(ctx context.Context) ([]Object, error) {
 	return objects, nil
 }
 
-func (p *Podman) Create(ctx context.Context, e Exact, image string) error {
+func (p *Podman) Create(ctx context.Context, e Exact, image string) (err error) {
+	defer func() { err = localRuntimeError(ctx, err) }()
 	if !p.initialized {
 		return ErrNotReady
 	}
@@ -188,6 +205,13 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) error {
 	}
 	args := []string{"container", "create", "--pull=never", "--name", objectName(e),
 		"--network=none", "--image-volume=ignore", "--cap-drop=ALL", "--security-opt=no-new-privileges"}
+	policy := p.resourcePolicy()
+	args = append(args, "--memory="+strconv.FormatInt(policy.MemoryBytes, 10),
+		"--memory-swap="+strconv.FormatInt(policy.MemoryBytes+policy.SwapBytes, 10),
+		"--cpu-quota="+strconv.FormatInt(policy.CPUQuota, 10),
+		"--cgroup-conf=cpu.weight="+strconv.FormatUint(policy.CPUWeight, 10),
+		"--pids-limit="+strconv.FormatUint(policy.PIDsMax, 10),
+		"--ulimit=nofile="+strconv.FormatUint(policy.NoFile, 10)+":"+strconv.FormatUint(policy.NoFile, 10))
 	labels := objectLabels(e, image)
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
@@ -215,7 +239,8 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) error {
 	return err
 }
 
-func (p *Podman) Destroy(ctx context.Context, e Exact) error {
+func (p *Podman) Destroy(ctx context.Context, e Exact) (err error) {
+	defer func() { err = localRuntimeError(ctx, err) }()
 	if err := e.validate(); err != nil {
 		return err
 	}

@@ -24,6 +24,21 @@ func main() {
 	stateDir := flag.String("state-dir", "", "private absolute lifecycle journal directory")
 	image := flag.String("image", "", "canonical locally installed image pinned with @sha256:digest")
 	podmanPath := flag.String("podman", "/usr/bin/podman", "absolute host-side rootless Podman executable")
+	dataDir := flag.String("data-dir", "", "absolute shared disposable Data pool path (default state-dir filesystem)")
+	policy := workspace.ReferencePolicy()
+	flag.Int64Var(&policy.MemoryBytes, "memory-bytes", policy.MemoryBytes, "memory limit per resource-bearing generation")
+	flag.IntVar(&policy.MaxGenerations, "max-generations", policy.MaxGenerations, "maximum resource-bearing generations, including uncertain intent")
+	flag.Int64Var(&policy.SwapBytes, "swap-bytes", policy.SwapBytes, "swap allowance per generation")
+	flag.Int64Var(&policy.CPUQuota, "cpu-quota", policy.CPUQuota, "CPU hard quota in microseconds (-1 for none)")
+	flag.Uint64Var(&policy.CPUWeight, "cpu-weight", policy.CPUWeight, "effective cgroup v2 CPU weight")
+	flag.Uint64Var(&policy.PIDsMax, "pids-max", policy.PIDsMax, "maximum tasks per generation")
+	flag.Uint64Var(&policy.MigrationTasksMax, "migration-tasks-max", policy.MigrationTasksMax, "bounded raced migration tasks (must equal pids-max + 1)")
+	flag.Uint64Var(&policy.NoFile, "nofile", policy.NoFile, "equal soft and hard file descriptor limits")
+	flag.IntVar(&policy.MaxBackendOperations, "max-backend-operations", policy.MaxBackendOperations, "maximum live or outcome-uncertain backend operations")
+	flag.DurationVar(&policy.IdleTTL, "idle-ttl", policy.IdleTTL, "operator idle lifetime (must be positive)")
+	flag.DurationVar(&policy.AbsoluteTTL, "absolute-ttl", policy.AbsoluteTTL, "operator absolute lifetime (must be positive)")
+	flag.Uint64Var(&policy.MinAvailableBytes, "min-available-bytes", policy.MinAvailableBytes, "normal-user Data pool byte safety threshold")
+	flag.Uint64Var(&policy.MinFreeInodes, "min-free-inodes", policy.MinFreeInodes, "Data pool inode safety threshold")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "mcp-workspaced: unexpected positional arguments")
@@ -44,7 +59,7 @@ func main() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath}); err != nil {
+		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy}); err != nil {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
 			os.Exit(1)
 		}

@@ -2,8 +2,9 @@
 
 `internal/workspace` contains the host-side lifecycle service and a narrow Podman
 CLI adapter. The existing MCP smoke server remains tool-free. No product ingress,
-authentication transport, exec/files, build, TTL or full resource/backend/storage
-admission is added in this slice.
+authentication transport, exec/files or build is introduced. P4a adds reusable
+TTL and resource/backend/storage admission on this substrate; see
+[the admission contract](admission.md) for current policy and recovery behavior.
 
 ## Identity and authority
 
@@ -31,7 +32,8 @@ ignored; service lookalikes are never adopted or cleaned up automatically.
 The only public states are ABSENT and PRESENT. The durable journal records exact
 generation intent before create can mutate the runtime. A partial, failed or
 unconfirmed create conservatively retains PRESENT, including across restart.
-Create on PRESENT returns the existing generation without runtime inspection,
+Create on PRESENT returns the existing generation and records admitted idle activity
+within the operator absolute TTL, without runtime inspection,
 repair, restart or replacement. An explicit successful destroy is needed before
 another candidate can be allocated.
 
@@ -81,7 +83,8 @@ mode. Production execution requires a non-root service account. Discovery uses
 JSON list/inspect output. Create uses only the canonical image, never pulls, does
 not mount host paths or engine sockets, disables implicit image volumes and uses
 no privileged/nested engine. This slice uses no network, drops container
-capabilities and enables no-new-privileges, but does not claim full P4 admission.
+capabilities and enables no-new-privileges, and applies the configured P4a resource limits. Process injection remains a
+separate trusted runtime capability; see the admission contract.
 Start/remove operate on full immutable container IDs resolved and validated for
 exact W/G; neither logical-key deletion nor bulk/prune operations exist. Output
 is bounded and commands honor context cancellation. No Podman/libpod SDK is used.
