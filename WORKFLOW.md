@@ -10,7 +10,8 @@ Issue に記述された作業を、この repository の isolated workspace で
 - executable child は、その exact Issue を指定した Human execution grant が存在する場合だけ実行する。
 - Human grant の execution mode / mutation scope を超えない。
 - sibling Issue、downstream Issue、過去の grant、Design Authority の acceptance から実行権限を継承しない。
-- Issue / launcher / Human grant / #20 Design Authority の内容が衝突する場合は、実装で補完せず STOP して Human に返す。
+- Issue / launcher / Human grant / accepted Parent Product Contract (#60) / #20 Design Authority の内容が衝突する場合は、実装で補完せず STOP して Human に返す。
+- declared dependency が未完了・不明・current state と矛盾する場合は、その dependency を暗黙実装・迂回せず STOP して Human に返す。
 - unrelated changes や scope 外の追加実装を行わない。
 - architecture/security invariant を実装都合で変更しない。必要なら Design Authority change-control に戻す。
 
