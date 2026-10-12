@@ -56,7 +56,8 @@ func jsonText(t *testing.T, value any) string {
 }
 func inspectJSON(t *testing.T, o Object) string {
 	return jsonText(t, []any{map[string]any{"Id": o.ID, "Name": o.Name,
-		"Config": map[string]any{"Image": o.Image, "Labels": o.Labels}}})
+		"Image": strings.Repeat("e", 64), "ImageName": o.Image,
+		"Config": map[string]any{"Labels": o.Labels}}})
 }
 func listJSON(t *testing.T, objects ...Object) string {
 	listed := make([]any, 0, len(objects))
@@ -73,6 +74,42 @@ func listStep(output string) commandStep {
 }
 func inspectStep(t *testing.T, o Object) commandStep {
 	return commandStep{args: []string{"container", "inspect", "--", o.ID}, output: inspectJSON(t, o)}
+}
+
+func TestPodmanDiscoveryRequiresTopLevelImageName(t *testing.T) {
+	e := Exact{identity(t, "s", "c").Workspace(), Generation(strings.Repeat("b", 64))}
+	o := fakeObject(e)
+	for _, mode := range []string{"canonical", "missing", "empty", "different"} {
+		t.Run(mode, func(t *testing.T) {
+			// Config.Image must not substitute for the top-level reference,
+			// and the top-level Image is an image ID, not that reference.
+			inspected := map[string]any{"Id": o.ID, "Name": o.Name,
+				"Image":  strings.Repeat("e", 64),
+				"Config": map[string]any{"Image": testImage, "Labels": o.Labels}}
+			switch mode {
+			case "canonical":
+				inspected["ImageName"] = testImage
+				inspected["Config"].(map[string]any)["Image"] = "different:latest"
+			case "empty":
+				inspected["ImageName"] = ""
+			case "different":
+				inspected["ImageName"] = "other@sha256:" + strings.Repeat("c", 64)
+			}
+			p, _ := podmanStub(t, infoStep(), listStep(listJSON(t, o)),
+				commandStep{args: []string{"container", "inspect", "--", o.ID}, output: jsonText(t, []any{inspected})})
+			if err := p.Initialize(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			objects, err := p.List(context.Background())
+			if mode == "canonical" {
+				if err != nil || len(objects) != 1 || !reflect.DeepEqual(objects[0], o) {
+					t.Fatalf("canonical object not discovered: %v, %v", objects, err)
+				}
+			} else if err == nil {
+				t.Fatal("missing or mismatched ImageName accepted via another image field")
+			}
+		})
+	}
 }
 
 func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {

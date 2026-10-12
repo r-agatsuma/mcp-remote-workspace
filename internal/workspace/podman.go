@@ -99,10 +99,10 @@ func (p *Podman) inspect(ctx context.Context, id string) (Object, error) {
 		return Object{}, err
 	}
 	var inspected []struct {
-		ID     string `json:"Id"`
-		Name   string
-		Config struct {
-			Image  string
+		ID        string `json:"Id"`
+		Name      string
+		ImageName string `json:"ImageName"` // Image is the image ID, not its canonical reference.
+		Config    struct {
 			Labels map[string]string
 		}
 	}
@@ -113,7 +113,7 @@ func (p *Podman) inspect(ctx context.Context, id string) (Object, error) {
 		return Object{}, errors.New("unexpected exact container inspection")
 	}
 	o := inspected[0]
-	return Object{ID: o.ID, Name: o.Name, Labels: o.Config.Labels, Image: o.Config.Image}, nil
+	return Object{ID: o.ID, Name: o.Name, Labels: o.Config.Labels, Image: o.ImageName}, nil
 }
 
 func (p *Podman) List(ctx context.Context) ([]Object, error) {
