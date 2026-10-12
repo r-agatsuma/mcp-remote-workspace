@@ -1,4 +1,4 @@
-// mcp-workspaced is currently a local MCP SDK smoke/build skeleton.
+// mcp-workspaced supplies a local MCP smoke check and host lifecycle skeleton.
 package main
 
 import (
@@ -7,9 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/r-agatsuma/mcp-remote-workspace/internal/workspace"
 )
 
 const serverName = "mcp-workspaced"
@@ -17,10 +20,35 @@ const serverVersion = "0.0.0-dev"
 
 func main() {
 	smoke := flag.Bool("smoke", false, "check an in-memory MCP connection and exit (5-second deadline)")
+	daemon := flag.Bool("daemon", false, "own and reconcile local lifecycle state until shutdown (no listener)")
+	stateDir := flag.String("state-dir", "", "private absolute lifecycle journal directory")
+	image := flag.String("image", "", "canonical locally installed image pinned with @sha256:digest")
+	podmanPath := flag.String("podman", "/usr/bin/podman", "absolute host-side rootless Podman executable")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "mcp-workspaced: unexpected positional arguments")
 		os.Exit(2)
+	}
+	if *daemon && *smoke {
+		fmt.Fprintln(os.Stderr, "mcp-workspaced: choose -daemon or -smoke")
+		os.Exit(2)
+	}
+	if *daemon {
+		if *stateDir == "" {
+			var err error
+			*stateDir, err = workspace.DefaultStateDir()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
+				os.Exit(1)
+			}
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath}); err != nil {
+			fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if !*smoke {
 		flag.Usage()
