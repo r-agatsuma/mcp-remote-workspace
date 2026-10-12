@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 var injected = errors.New("injected runtime fault")
@@ -44,7 +45,7 @@ func (f *fakeRuntime) List(context.Context) ([]Object, error) {
 	}
 	return result, nil
 }
-func (f *fakeRuntime) Create(_ context.Context, e Exact, _ string) error {
+func (f *fakeRuntime) Create(ctx context.Context, e Exact, _ string) error {
 	f.creates++
 	if !f.omitCreate {
 		f.objects[e] = fakeObject(e)
@@ -52,9 +53,9 @@ func (f *fakeRuntime) Create(_ context.Context, e Exact, _ string) error {
 	if f.afterCreate != nil {
 		f.afterCreate()
 	}
-	return f.createErr
+	return localRuntimeError(ctx, f.createErr)
 }
-func (f *fakeRuntime) Destroy(_ context.Context, e Exact) error {
+func (f *fakeRuntime) Destroy(ctx context.Context, e Exact) error {
 	f.destroys++
 	if !f.retainDestroy {
 		delete(f.objects, e)
@@ -62,11 +63,11 @@ func (f *fakeRuntime) Destroy(_ context.Context, e Exact) error {
 	if f.afterDestroy != nil {
 		f.afterDestroy()
 	}
-	return f.destroyErr
+	return localRuntimeError(ctx, f.destroyErr)
 }
 
 func testConfig(dir string) Config {
-	return Config{StateDir: dir, Image: testImage, PodmanPath: "/stub/podman"}
+	return Config{StateDir: dir, Image: testImage, PodmanPath: "/stub/podman", Storage: storageFunc(func(context.Context, string) (StorageSample, error) { return StorageSample{1 << 40, 1 << 30}, nil })}
 }
 func newFake() *fakeRuntime { return &fakeRuntime{objects: make(map[Exact]Object)} }
 func openFake(t *testing.T, f *fakeRuntime) (*Service, Config, string) {
@@ -248,7 +249,9 @@ func TestPersistenceFaultClosesAdmission(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s.save = func(string, string, map[WorkspaceKey]Exact) error { return injected }
+			s.save = func(string, string, map[WorkspaceKey]Exact, map[Exact]Lifetime, bool, BackendState) error {
+				return injected
+			}
 			if operation == "create" {
 				if _, err := s.Create(context.Background(), i); !errors.Is(err, injected) {
 					t.Fatal(err)
@@ -400,7 +403,12 @@ func TestReconciliationRejectsUnknownAndLookalikeObjects(t *testing.T) {
 			case "init-failure":
 				f.initErr = injected
 			}
-			if err := writeJournal(filepath.Join(cfg.StateDir, "journal.json"), cfg.Image, entries); err != nil {
+			lifetimes := make(map[Exact]Lifetime)
+			now := time.Now()
+			for _, entry := range entries {
+				lifetimes[entry] = Lifetime{entry, now, now}
+			}
+			if err := writeAdmissionJournal(filepath.Join(cfg.StateDir, "journal.json"), cfg.Image, entries, lifetimes, false, BackendState{Next: 1}); err != nil {
 				t.Fatal(err)
 			}
 			s, err := open(context.Background(), cfg, func() Runtime { return f }, lock)

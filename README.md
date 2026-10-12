@@ -14,8 +14,9 @@ The lifecycle core implements trusted conversation identity, durable exact-gener
 create/destroy, singleton ownership and startup reconciliation. `-daemon` owns and
 reconciles local state until shutdown; it opens no network listener and exposes no
 product tools. See [the lifecycle contract](docs/lifecycle.md) for configuration,
-trust boundaries and failure behavior. Full resource/backend/storage admission
-and TTL are not implemented; this slice is not production-ready.
+trust boundaries and failure behavior. Reusable generation, process, backend,
+TTL and shared-pool storage controls are described in [the admission contract](docs/admission.md).
+They are tested with local fakes; real-host verification remains separate.
 
 ## Go baseline
 
