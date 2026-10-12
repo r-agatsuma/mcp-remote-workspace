@@ -7,7 +7,7 @@ Supplied Issue を、この repository の isolated iro workspace で実装す�
 ## iro execution model
 
 - managed `iro run` / `iro revise` が渡した Issue/PR context をその execution unit の task specification として扱う。
-- `iro run <issue>` の invocation 自体が、その Issue を実装する選択である。別の ACCEPT / GO / grant record を確認しない。
+- `iro run <issue>` の invocation 自体が、その Issue を実装する選択である。
 - Parent / Refs / sibling Issue 番号は traceability であり、worker が tracker traversal して本文や comments を補完する前提にしない。
 - 実装判断に必要な normative requirement は supplied Issue 自身に存在しなければならない。
 - predecessor の結果が必要な場合は、repository state または supplied Issue/comment に明示された input だけを使う。必要 artifact が無ければ STOP して報告する。
