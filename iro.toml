@@ -1,0 +1,11 @@
+version = 1
+
+[tracker]
+type = "github"
+remote = "origin"
+
+[agent]
+type = "codex"
+
+[workspace]
+strategy = "git-worktree"
