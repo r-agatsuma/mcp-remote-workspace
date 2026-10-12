@@ -1,0 +1,289 @@
+package workspace
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"sync"
+)
+
+var ErrNotReady = errors.New("lifecycle admission is closed")
+var ErrStaleGeneration = errors.New("stale workspace generation")
+
+type State string
+
+const (
+	Absent  State = "ABSENT"
+	Present State = "PRESENT"
+)
+
+type Config struct {
+	StateDir   string
+	Image      string // digest-pinned canonical image, supplied by the operator
+	PodmanPath string // absolute host-side executable path
+}
+
+func DefaultStateDir() (string, error) {
+	account, err := user.LookupId(strconv.Itoa(os.Geteuid()))
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(account.HomeDir) {
+		return "", errors.New("service account requires an absolute home directory")
+	}
+	return filepath.Join(account.HomeDir, ".local", "state", "mcp-workspaced"), nil
+}
+
+func (c Config) Validate() error {
+	if !filepath.IsAbs(c.StateDir) || !filepath.IsAbs(c.PodmanPath) || !validImage(c.Image) {
+		return errors.New("absolute state directory/Podman path and digest-pinned canonical image required")
+	}
+	return nil
+}
+
+type Service struct {
+	mu      sync.Mutex
+	runtime Runtime
+	image   string
+	path    string
+	lock    *os.File
+	ready   bool
+	entries map[WorkspaceKey]Exact
+	// Fault injection remains private; production uses the durable writer.
+	save func(string, string, map[WorkspaceKey]Exact) error
+}
+
+// Open obtains the account-wide singleton before constructing or discovering
+// runtime state. StateDir overrides cannot bypass the account-wide lock.
+func Open(ctx context.Context, cfg Config, factory func() Runtime) (*Service, error) {
+	lockDir, err := DefaultStateDir()
+	if err != nil {
+		return nil, err
+	}
+	return open(ctx, cfg, factory, filepath.Join(lockDir, "daemon.lock"))
+}
+
+func privateDir(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0077 != 0 || !ownedByService(info) {
+		return errors.New("state/lock directory must be private and service-owned")
+	}
+	return nil
+}
+
+func open(ctx context.Context, cfg Config, factory func() Runtime, lockPath string) (_ *Service, err error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if err := privateDir(filepath.Dir(lockPath)); err != nil {
+		return nil, err
+	}
+	lock, err := acquireLock(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			lock.Close()
+		}
+	}()
+	if err := privateDir(cfg.StateDir); err != nil {
+		return nil, err
+	}
+	s := &Service{runtime: factory(), image: cfg.Image, path: filepath.Join(cfg.StateDir, "journal.json"), lock: lock, save: writeJournal}
+	if s.runtime == nil {
+		return nil, errors.New("runtime is required")
+	}
+	if err := s.reconcile(ctx); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Service) reconcile(ctx context.Context) error {
+	entries, err := readJournal(s.path, s.image)
+	if err != nil {
+		return err
+	}
+	if err := s.runtime.Initialize(ctx); err != nil {
+		return err
+	}
+	if _, err := discover(ctx, s.runtime, entries, s.image); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Missing runtime objects retain PRESENT intent: startup does not repair,
+	// restart, replace, or erase incomplete create/destroy operations.
+	s.entries, s.ready = entries, true
+	return nil
+}
+
+func (s *Service) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ready = false
+	if s.lock == nil {
+		return nil
+	}
+	err := s.lock.Close()
+	s.lock = nil
+	return err
+}
+
+func (s *Service) admitted(identity Identity) error {
+	if !s.ready {
+		return ErrNotReady
+	}
+	if !validHex(string(identity.key)) {
+		return errors.New("trusted identity is required")
+	}
+	return nil
+}
+
+func (s *Service) Status(identity Identity) (State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.admitted(identity); err != nil {
+		return "", err
+	}
+	if _, ok := s.entries[identity.key]; ok {
+		return Present, nil
+	}
+	return Absent, nil
+}
+
+func clone(entries map[WorkspaceKey]Exact) map[WorkspaceKey]Exact {
+	next := make(map[WorkspaceKey]Exact, len(entries))
+	for w, e := range entries {
+		next[w] = e
+	}
+	return next
+}
+
+func (s *Service) commit(next map[WorkspaceKey]Exact) error {
+	if err := s.save(s.path, s.image, next); err != nil {
+		s.ready = false
+		return err
+	}
+	s.entries = next
+	return nil
+}
+
+func (s *Service) Create(ctx context.Context, identity Identity) (Exact, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.admitted(identity); err != nil {
+		return Exact{}, err
+	}
+	if current, present := s.entries[identity.key]; present {
+		return current, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return Exact{}, err
+	}
+	if _, err := discover(ctx, s.runtime, s.entries, s.image); err != nil {
+		return Exact{}, err
+	}
+	generation, err := freshGeneration()
+	if err != nil {
+		return Exact{}, err
+	}
+	e := Exact{identity.key, generation}
+	next := clone(s.entries)
+	next[identity.key] = e
+	if err := s.commit(next); err != nil {
+		return Exact{}, err
+	}
+	// Intent is durable before a possibly partial/unknown runtime operation.
+	if err := s.runtime.Create(ctx, e, s.image); err != nil {
+		return e, err
+	}
+	objects, err := discover(ctx, s.runtime, s.entries, s.image)
+	if err != nil {
+		return e, err
+	}
+	if _, exists := objects[e]; !exists {
+		return e, errors.New("created generation could not be confirmed")
+	}
+	return e, nil
+}
+
+func (s *Service) Destroy(ctx context.Context, identity Identity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.admitted(identity); err != nil {
+		return err
+	}
+	e, present := s.entries[identity.key]
+	if !present {
+		return nil
+	}
+	return s.destroy(ctx, e)
+}
+
+// DestroyGeneration is for host-side delayed cleanup, never caller-supplied
+// IDs. Fencing and runtime mutation share the same critical section.
+func (s *Service) DestroyGeneration(ctx context.Context, e Exact) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.ready {
+		return ErrNotReady
+	}
+	if err := e.validate(); err != nil {
+		return err
+	}
+	if s.entries[e.Workspace] != e {
+		return ErrStaleGeneration
+	}
+	return s.destroy(ctx, e)
+}
+
+// WithGeneration fences delayed publication/callbacks. The host callback runs
+// under the lifecycle lock and must not reenter this Service.
+func (s *Service) WithGeneration(e Exact, callback func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.ready {
+		return ErrNotReady
+	}
+	if err := e.validate(); err != nil {
+		return err
+	}
+	if s.entries[e.Workspace] != e {
+		return ErrStaleGeneration
+	}
+	return callback()
+}
+
+func (s *Service) destroy(ctx context.Context, e Exact) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := discover(ctx, s.runtime, s.entries, s.image); err != nil {
+		return err
+	}
+	if err := s.runtime.Destroy(ctx, e); err != nil {
+		return err
+	}
+	objects, err := discover(ctx, s.runtime, s.entries, s.image)
+	if err != nil {
+		return err
+	}
+	if _, exists := objects[e]; exists {
+		return errors.New("destroy did not establish exact-generation absence")
+	}
+	next := clone(s.entries)
+	delete(next, e.Workspace)
+	return s.commit(next)
+}

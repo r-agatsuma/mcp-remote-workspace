@@ -1,16 +1,21 @@
 # mcp-remote-workspace
 
-Go source baseline for `mcp-workspaced`. The module path is
+Go MCP baseline and host-side lifecycle core for `mcp-workspaced`. The module path is
 `github.com/r-agatsuma/mcp-remote-workspace` and the command lives at
 `cmd/mcp-workspaced`.
 
-This slice contains a build skeleton and a bounded local MCP smoke check.
+The command includes a daemon skeleton and a bounded local MCP smoke check.
 Running without arguments prints usage and exits; `-smoke` connects an SDK client
 and server in memory using MCP `2025-11-25`, checks server identity/capabilities,
 pings, verifies an empty
 tool list, closes the sessions, and exits. The whole operation has a five-second
 deadline and returns a nonzero status on failure. It opens no network listener.
-There are no workspace lifecycle operations or product tools.
+The lifecycle core implements trusted conversation identity, durable exact-generation
+create/destroy, singleton ownership and startup reconciliation. `-daemon` owns and
+reconciles local state until shutdown; it opens no network listener and exposes no
+product tools. See [the lifecycle contract](docs/lifecycle.md) for configuration,
+trust boundaries and failure behavior. Full resource/backend/storage admission
+and TTL are not implemented; this slice is not production-ready.
 
 ## Go baseline
 
@@ -26,7 +31,7 @@ Run from the repository root with the pinned toolchain:
 
 ```sh
 export GOTOOLCHAIN=go1.26.9
-gofmt -w cmd/mcp-workspaced/*.go
+gofmt -w cmd/mcp-workspaced/*.go internal/workspace/*.go
 go test ./...
 go test -race ./...
 go vet ./...
@@ -44,9 +49,14 @@ The HTTP test configuration is an SDK suitability probe, not a production
 transport or authentication contract.
 
 Inspect the locally built artifact with `go version -m ./mcp-workspaced` if needed.
+Lifecycle tests use fake runtimes, stub CLI responses and a local stub executable;
+they do not invoke Podman. They cover identity, fresh generations, idempotency,
+partial failures, stale callbacks, durable recovery, process-lock conflicts and
+reconciliation admission gates.
 These checks establish local source/build behavior only. Target-host execution,
 linkage, CGO/shared-library behavior and portability require separate verification
-of the delivered revision in Issue #68.
+of the delivered revision in external verification Issues (#68 for the baseline,
+#69 for this lifecycle slice).
 
 See [the dependency inventory](docs/dependencies.md) for versions, provenance and
 the scope of the SDK adoption evidence.
