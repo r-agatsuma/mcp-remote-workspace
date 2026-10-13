@@ -14,6 +14,7 @@ import (
 // ToolAdmission is supplied by trusted host ingress. It must bind the request
 // to an existing exact generation, without create or retry. Neither identity nor
 // generation is a caller argument; unverified wire _meta is not trusted here.
+// It must honor context cancellation and must not submit runtime work itself.
 type ToolAdmission func(context.Context, *mcp.CallToolRequest) (Identity, Exact, error)
 
 // RegisterTools installs the public v0 tools without opening any transport.
@@ -59,7 +60,10 @@ func RegisterTools(server *mcp.Server, service *Service, admit ToolAdmission) er
 		server.AddTool(&mcp.Tool{Name: d.name, Description: d.description, InputSchema: map[string]any{
 			"type": "object", "properties": d.properties, "required": d.required, "additionalProperties": false,
 		}}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			i, e, err := admit(ctx, request)
+			// Share one deadline across host admission and the Service operation.
+			ctx, cancel := context.WithTimeout(ctx, service.toolTimeout)
+			defer cancel()
+			i, e, err := awaitToolAdmission(ctx, request, admit)
 			var output any
 			if err == nil {
 				output, err = d.call(ctx, i, e, request.Params.Arguments)
@@ -76,6 +80,33 @@ func RegisterTools(server *mcp.Server, service *Service, admit ToolAdmission) er
 		})
 	}
 	return nil
+}
+
+// Only admission runs in the worker, so a late callback cannot dispatch a tool.
+// The buffered result lets a callback finish after the caller has timed out.
+func awaitToolAdmission(ctx context.Context, request *mcp.CallToolRequest, admit ToolAdmission) (Identity, Exact, error) {
+	if err := ctx.Err(); err != nil {
+		return Identity{}, Exact{}, err
+	}
+	type result struct {
+		identity Identity
+		exact    Exact
+		err      error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		i, e, err := admit(ctx, request)
+		finished <- result{i, e, err}
+	}()
+	select {
+	case r := <-finished:
+		if err := ctx.Err(); err != nil {
+			return Identity{}, Exact{}, errors.Join(ErrOutcomeUnknown, err)
+		}
+		return r.identity, r.exact, r.err
+	case <-ctx.Done():
+		return Identity{}, Exact{}, errors.Join(ErrOutcomeUnknown, ctx.Err())
+	}
 }
 
 func decodeToolRequest(raw json.RawMessage, destination any, required ...string) error {

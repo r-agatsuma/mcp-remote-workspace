@@ -151,3 +151,135 @@ func TestDecodeToolRequestUTF8AndNullContract(t *testing.T) {
 		t.Fatal("null environment value accepted")
 	}
 }
+
+func connectToolClient(t *testing.T, server *mcp.Server) *mcp.ClientSession {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	ct, st := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Close() })
+	client := mcp.NewClient(&mcp.Implementation{Name: "deadline-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	return cs
+}
+
+func TestPublicToolDeadlineBoundsAdmissionAndDiscardsLateResults(t *testing.T) {
+	for _, cooperative := range []bool{true, false} {
+		for _, call := range []struct {
+			name string
+			args any
+		}{
+			{"exec", map[string]any{"argv": []string{"true"}}},
+			{"exec", map[string]any{"argv": []string{"true"}, "detach": true}},
+			{"read_text", map[string]any{"path": "/f"}},
+			{"write_text", map[string]any{"path": "/f", "content": "x"}},
+		} {
+			mode := "stalled/"
+			if cooperative {
+				mode = "cooperative/"
+			}
+			t.Run(mode+call.name, func(t *testing.T) {
+				s, f, i, e := openTools(t, Config{ToolTimeout: 50 * time.Millisecond})
+				release, exited := make(chan struct{}), make(chan struct{})
+				defer close(release)
+				admissionContext := make(chan context.Context, 1)
+				server := mcp.NewServer(&mcp.Implementation{Name: "deadline-test", Version: "0"}, nil)
+				if err := RegisterTools(server, s, func(ctx context.Context, _ *mcp.CallToolRequest) (Identity, Exact, error) {
+					defer close(exited)
+					admissionContext <- ctx
+					if cooperative {
+						<-ctx.Done()
+					} else {
+						<-release
+					}
+					return i, e, nil // late success must never reach Service injection
+				}); err != nil {
+					t.Fatal(err)
+				}
+				cs := connectToolClient(t, server)
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				result, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: call.name, Arguments: call.args})
+				if err != nil || !result.IsError || len(result.Content) != 1 {
+					t.Fatal("admission defeated configured lifetime", result, err)
+				}
+				var tool ToolError
+				text := result.Content[0].(*mcp.TextContent).Text
+				if json.Unmarshal([]byte(text), &tool) != nil || tool.Code != "outcome_unknown" || !tool.OutcomeUnknown || len(text) > 300 {
+					t.Fatal("unbounded or missing uncertainty error", text)
+				}
+				callbackCtx := <-admissionContext
+				if _, ok := callbackCtx.Deadline(); !ok || !errors.Is(callbackCtx.Err(), context.DeadlineExceeded) {
+					t.Fatal("admission did not receive the configured deadline")
+				}
+				// Release an uncooperative callback after the public response. Wait
+				// for its return before inspecting that no late work was submitted.
+				if !cooperative {
+					release <- struct{}{}
+				}
+				<-exited
+				if f.calls != 0 || f.probes != 0 || len(s.PendingBackend()) != 0 {
+					t.Fatal("late admission submitted runtime work or consumed accounting")
+				}
+			})
+		}
+	}
+}
+
+func TestPublicAdmissionAndRuntimeShareDeadline(t *testing.T) {
+	s, f, i, e := openTools(t, Config{ToolTimeout: time.Second})
+	var admissionDeadline time.Time
+	server := mcp.NewServer(&mcp.Implementation{Name: "deadline-test", Version: "0"}, nil)
+	if err := RegisterTools(server, s, func(ctx context.Context, _ *mcp.CallToolRequest) (Identity, Exact, error) {
+		admissionDeadline, _ = ctx.Deadline()
+		return i, e, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.start = func(ctx context.Context, _ ProcessSnapshot, _ ExecRequest, _, _ io.Writer) (<-chan ExecOutcome, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || admissionDeadline.IsZero() || !deadline.Equal(admissionDeadline) {
+			t.Error("runtime received a refreshed deadline", deadline, admissionDeadline)
+		}
+		return terminal(ExecOutcome{Completion: DefinitelyCompleted}), nil
+	}
+	cs := connectToolClient(t, server)
+	result, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "exec", Arguments: map[string]any{"argv": []string{"true"}}})
+	if err != nil || result.IsError || f.calls != 1 {
+		t.Fatal(result, err)
+	}
+}
+
+func TestToolAdmissionCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := awaitToolAdmission(ctx, nil, func(context.Context, *mcp.CallToolRequest) (Identity, Exact, error) {
+		t.Error("pre-canceled request invoked admission")
+		return Identity{}, Exact{}, nil
+	})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatal("pre-admission cancellation mapped incorrectly", err)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	release, exited := make(chan struct{}), make(chan struct{})
+	_, _, err = awaitToolAdmission(ctx, nil, func(context.Context, *mcp.CallToolRequest) (Identity, Exact, error) {
+		defer close(exited)
+		cancel()
+		<-release
+		return Identity{}, Exact{}, nil
+	})
+	close(release)
+	<-exited
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatal("in-flight admission cancellation lost uncertainty", err)
+	}
+}

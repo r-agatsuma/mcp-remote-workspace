@@ -60,6 +60,12 @@ can resolve the original operation, independently of the caller lifetime.
 `Config.ToolTimeout` is an operator-owned finite control-plane lifetime for exec
 and file calls, including admission/probe/submission waits. Zero selects 30 seconds;
 negative values are invalid. The command exposes positive `-tool-timeout`.
+MCP registration starts the deadline before the host admission callback and
+passes that same deadline through to the Service operation. The callback must
+honor cancellation and must not submit runtime work itself. The handler bounds
+its wait even if the callback stalls, and discards late admission results without
+dispatching a tool. Go cannot forcibly stop a callback that ignores cancellation;
+its worker remains until the callback returns.
 Deadline expiry while admission/submission is in flight returns uncertainty;
 a context already canceled before admission returns cancellation. Trusted recovery
 continues to use P4a `PendingBackend` / `RecoverBackend`; this adds no durable job
