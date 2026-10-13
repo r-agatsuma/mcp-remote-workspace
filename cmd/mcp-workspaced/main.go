@@ -25,6 +25,7 @@ func main() {
 	image := flag.String("image", "", "canonical locally installed image pinned with @sha256:digest")
 	podmanPath := flag.String("podman", "/usr/bin/podman", "absolute host-side rootless Podman executable")
 	dataDir := flag.String("data-dir", "", "absolute shared disposable Data pool path (default state-dir filesystem)")
+	toolTimeout := flag.Duration("tool-timeout", 30*time.Second, "positive exec/file control-plane lifetime")
 	policy := workspace.ReferencePolicy()
 	flag.Int64Var(&policy.MemoryBytes, "memory-bytes", policy.MemoryBytes, "memory limit per resource-bearing generation")
 	flag.IntVar(&policy.MaxGenerations, "max-generations", policy.MaxGenerations, "maximum resource-bearing generations, including uncertain intent")
@@ -59,7 +60,11 @@ func main() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy}); err != nil {
+		if *toolTimeout <= 0 {
+			fmt.Fprintln(os.Stderr, "mcp-workspaced: tool-timeout must be positive")
+			os.Exit(2)
+		}
+		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}); err != nil {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
 			os.Exit(1)
 		}

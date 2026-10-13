@@ -22,13 +22,14 @@ const (
 )
 
 type Config struct {
-	StateDir   string
-	Image      string           // digest-pinned canonical image, supplied by the operator
-	PodmanPath string           // absolute host-side executable path
-	DataDir    string           // shared disposable pool; defaults to StateDir
-	Policy     *Policy          // nil selects reference-host defaults; copied at Open
-	Storage    StorageProbe     // nil selects normal-user statfs
-	Clock      func() time.Time // nil selects time.Now; trusted host clock only
+	StateDir    string
+	Image       string           // digest-pinned canonical image, supplied by the operator
+	PodmanPath  string           // absolute host-side executable path
+	DataDir     string           // shared disposable pool; defaults to StateDir
+	Policy      *Policy          // nil selects reference-host defaults; copied at Open
+	Storage     StorageProbe     // nil selects normal-user statfs
+	Clock       func() time.Time // nil selects time.Now; trusted host clock only
+	ToolTimeout time.Duration    // zero selects 30s; operator-owned control-plane lifetime
 }
 
 func DefaultStateDir() (string, error) {
@@ -43,6 +44,9 @@ func DefaultStateDir() (string, error) {
 }
 
 func (c Config) Validate() error {
+	if c.ToolTimeout < 0 {
+		return errors.New("tool timeout must be positive or zero for default")
+	}
 	if !filepath.IsAbs(c.StateDir) || !filepath.IsAbs(c.PodmanPath) || !validImage(c.Image) {
 		return errors.New("absolute state directory/Podman path and digest-pinned canonical image required")
 	}
@@ -73,6 +77,7 @@ type Service struct {
 	storageBlocked bool
 	backend        *BackendLedger
 	injections     map[Exact]*BackendPermit
+	toolTimeout    time.Duration
 }
 
 // Open obtains the account-wide singleton before constructing or discovering
@@ -131,12 +136,15 @@ func open(ctx context.Context, cfg Config, factory func() Runtime, lockPath stri
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
+	if cfg.ToolTimeout == 0 {
+		cfg.ToolTimeout = 30 * time.Second
+	}
 	backend, err := NewBackendLedger(policy.MaxBackendOperations, policy.MaxDiagnostics)
 	if err != nil {
 		return nil, err
 	}
 	s := &Service{runtime: factory(), image: cfg.Image, path: filepath.Join(cfg.StateDir, "journal.json"), lock: lock, save: writeAdmissionJournal,
-		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit)}
+		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout}
 	if s.runtime == nil {
 		return nil, errors.New("runtime is required")
 	}

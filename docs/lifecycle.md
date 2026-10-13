@@ -2,9 +2,10 @@
 
 `internal/workspace` contains the host-side lifecycle service and a narrow Podman
 CLI adapter. The existing MCP smoke server remains tool-free. No product ingress,
-authentication transport, exec/files or build is introduced. P4a adds reusable
+authentication transport, exec/files or build is introduced by P2a. P4a adds reusable
 TTL and resource/backend/storage admission on this substrate; see
 [the admission contract](admission.md) for current policy and recovery behavior.
+[P3a tools](tools.md) provide embedded exec/text tool registration using that gate.
 
 ## Identity and authority
 
