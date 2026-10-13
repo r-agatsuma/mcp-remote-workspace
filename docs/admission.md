@@ -1,8 +1,8 @@
 # Admission controls (P4a)
 
 The lifecycle service now owns generation, backend, process injection, TTL and
-shared-pool storage admission. These are host-side primitives for later exec/build
-consumers; no public exec/file/build tools or additional ingress are introduced.
+shared-pool storage admission. P4a supplies host-side primitives for exec/build
+consumers without additional ingress. [P3a tools](tools.md) consume this substrate.
 All policy, probes, callbacks and recovery APIs are trusted operator/runtime code,
 never caller-provided tool arguments. No scheduler or database is added: the daemon
 uses a TTL timer and admission state uses the existing singleton lifecycle journal.
@@ -65,10 +65,12 @@ There is at most one unfinished injection per exact generation, including across
 restart. Outcome-uncertain lifecycle mutations also block injection and new backend
 work for that generation. Stale exact state and stale snapshots cannot authorize a replacement.
 
-The current Podman adapter has no exec path and does not implement `ProcessProbe`;
-calling injection with it fails closed. Later runtime process paths must supply
-this trusted capability and use the gate. Real PID/cgroup/OCI validation remains
-outside this local implementation's evidence.
+P3a adds [exec/text tools](tools.md) consuming this gate, a streaming Podman exec
+adapter and a production Linux `ProcessProbe`. The probe binds a full immutable
+container ID to fresh runtime state and actual procfs/cgroup v2 observations.
+Missing, mismatched or raced evidence fails closed. Runtime paths without this
+capability still cannot inject. Deterministic fixtures exercise the production
+probe; real PID/cgroup/OCI validation remains external evidence.
 
 ## Backend completion and recovery
 

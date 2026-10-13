@@ -55,6 +55,8 @@ type Podman struct {
 	image       string
 	initialized bool
 	policy      *Policy
+	// Host-owned read-only proc/cgroup roots. Nil selects verified Linux mounts.
+	processRoots func() (*os.Root, *os.Root, error)
 }
 
 func NewPodman(path, image string) *Podman {
@@ -106,30 +108,45 @@ func (p *Podman) Initialize(ctx context.Context) error {
 	return nil
 }
 
-func (p *Podman) inspect(ctx context.Context, id string) (Object, error) {
+type containerInspection struct {
+	ID        string `json:"Id"`
+	Name      string
+	ImageName string
+	Config    struct{ Labels map[string]string }
+	State     struct {
+		Status                            string
+		Running, Paused, Restarting, Dead bool
+		Pid                               int
+		StartedAt                         string
+		CgroupPath                        string
+	}
+}
+
+func (v containerInspection) object() Object {
+	return Object{ID: v.ID, Name: v.Name, Labels: v.Config.Labels, Image: v.ImageName}
+}
+
+func (p *Podman) inspectContainer(ctx context.Context, id string) (containerInspection, error) {
 	if !validHex(id) {
-		return Object{}, errors.New("invalid runtime object ID")
+		return containerInspection{}, errors.New("invalid runtime object ID")
 	}
 	data, err := p.runner.run(ctx, "container", "inspect", "--", id)
 	if err != nil {
-		return Object{}, err
+		return containerInspection{}, err
 	}
-	var inspected []struct {
-		ID        string `json:"Id"`
-		Name      string
-		ImageName string `json:"ImageName"` // Image is the image ID, not its canonical reference.
-		Config    struct {
-			Labels map[string]string
-		}
-	}
+	var inspected []containerInspection
 	if err := json.Unmarshal(data, &inspected); err != nil {
-		return Object{}, err
+		return containerInspection{}, err
 	}
 	if len(inspected) != 1 || inspected[0].ID != id {
-		return Object{}, errors.New("unexpected exact container inspection")
+		return containerInspection{}, errors.New("unexpected exact container inspection")
 	}
-	o := inspected[0]
-	return Object{ID: o.ID, Name: o.Name, Labels: o.Config.Labels, Image: o.ImageName}, nil
+	return inspected[0], nil
+}
+
+func (p *Podman) inspect(ctx context.Context, id string) (Object, error) {
+	v, err := p.inspectContainer(ctx, id)
+	return v.object(), err
 }
 
 func (p *Podman) List(ctx context.Context) ([]Object, error) {

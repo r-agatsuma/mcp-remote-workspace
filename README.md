@@ -16,6 +16,10 @@ reconciles local state until shutdown; it opens no network listener and exposes 
 product tools. See [the lifecycle contract](docs/lifecycle.md) for configuration,
 trust boundaries and failure behavior. Reusable generation, process, backend,
 TTL and shared-pool storage controls are described in [the admission contract](docs/admission.md).
+Embedded servers can register `exec`, `read_text` and `write_text` with a trusted
+admission callback; see [the tool contract](docs/tools.md) for request/result limits,
+uncertain completion and runtime capability requirements. The landed Podman adapter
+implements a trusted Linux process/cgroup probe and rejects unverifiable state.
 They are tested with local fakes; real-host verification remains separate.
 
 ## Go baseline
