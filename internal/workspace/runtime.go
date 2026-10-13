@@ -59,7 +59,7 @@ func classify(o Object) (Exact, bool, error) {
 	}
 	e := Exact{WorkspaceKey(o.Labels[workspaceLabel]), Generation(o.Labels[generationLabel])}
 	if e.validate() != nil || o.Name != objectName(e) || o.Labels[ownerLabel] != ownerValue ||
-		!validImage(o.Image) || o.Labels[imageLabel] != o.Image || !validHex(o.ID) {
+		!validRuntimeImage(e, o.Image) || o.Labels[imageLabel] != o.Image || !validHex(o.ID) {
 		return Exact{}, false, errors.New("unrecognized service/lookalike runtime object")
 	}
 	return e, true, nil
@@ -87,6 +87,37 @@ func discover(ctx context.Context, runtime Runtime, entries map[WorkspaceKey]Exa
 		}
 		if entries[e.Workspace] != e || o.Image != image {
 			return nil, fmt.Errorf("runtime generation has no matching canonical journal intent: %s", o.Name)
+		}
+		if _, duplicate := known[e]; duplicate {
+			return nil, errors.New("duplicate runtime generation")
+		}
+		known[e] = o
+	}
+	return known, nil
+}
+
+func buildImageName(e Exact) string {
+	return "localhost/" + generationImageNamespace + "/" + string(e.Workspace) + ":" + string(e.Generation)
+}
+func validRuntimeImage(e Exact, image string) bool {
+	return validImage(image) || e.validate() == nil && image == buildImageName(e)
+}
+func (s *Service) discover(ctx context.Context) (map[Exact]Object, error) {
+	objects, err := s.runtime.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	known := map[Exact]Object{}
+	for _, o := range objects {
+		e, owned, err := classify(o)
+		if err != nil {
+			return nil, err
+		}
+		if !owned {
+			continue
+		}
+		if s.entries[e.Workspace] != e || s.records[e].Image != o.Image {
+			return nil, errors.New("runtime generation has no matching journal image intent")
 		}
 		if _, duplicate := known[e]; duplicate {
 			return nil, errors.New("duplicate runtime generation")

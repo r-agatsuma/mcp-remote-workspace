@@ -1,8 +1,8 @@
 # Lifecycle core (P2a)
 
 `internal/workspace` contains the host-side lifecycle service and a narrow Podman
-CLI adapter. The existing MCP smoke server remains tool-free. No product ingress,
-authentication transport, exec/files or build is introduced by P2a. P4a adds reusable
+CLI adapter. The existing MCP smoke server remains tool-free. No product ingress or
+authentication transport is introduced by this core. P4a adds reusable
 TTL and resource/backend/storage admission on this substrate; see
 [the admission contract](admission.md) for current policy and recovery behavior.
 [P3a tools](tools.md) provide embedded exec/text tool registration using that gate.
@@ -23,14 +23,17 @@ and delayed cleanup/publication operation.
 
 Container names have the exact form `mcpws-v1-<W>-<G>`. Ownership requires matching
 `io.mcp-workspaced.owner`, `.workspace`, `.generation` and `.image` labels, a full
-container ID and the configured digest-pinned image. Unknown labels in the service
+container ID and the journaled canonical or exact generation image. Unknown labels in the service
 namespace, inconsistent names/labels, unrecorded generations and a different
 canonical image cause reconciliation to fail closed. Unrelated containers are
 ignored; service lookalikes are never adopted or cleaned up automatically.
 
 ## State and failure behavior
 
-The only public states are ABSENT and PRESENT. The durable journal records exact
+Canonical-image creation retains the original ABSENT/PRESENT behavior described
+below. P5a Dockerfile creation adds PROCESSING/FAILED results and exact candidate
+phase/image metadata; see [the build contract](build.md). The durable journal
+records exact
 generation intent before create can mutate the runtime. A partial, failed or
 unconfirmed create conservatively retains PRESENT, including across restart.
 Create on PRESENT returns the existing generation and records admitted idle activity
@@ -59,8 +62,8 @@ closing the descriptor or process exit releases ownership. Lock/state directorie
 and files must be private and owned by the effective account. Non-Linux startup
 fails closed.
 
-Before admitting operations, startup validates the journal, verifies rootless
-runtime mode and reconciles all service-owned containers with saved exact intent.
+Before admitting operations, startup validates the journal, fences unfinished
+Dockerfile candidates, verifies rootless runtime mode and reconciles all service-owned containers with saved exact intent.
 It does not mutate runtime objects. Recorded generations whose containers are
 missing or stopped still remain PRESENT. Any uncertain or unrecognized discovery
 fails startup and releases the lock. A new empty journal cannot silently adopt
@@ -81,10 +84,12 @@ SIGINT/SIGTERM. There is no network admission in this skeleton.
 The adapter runs without a shell, explicitly uses `--remote=false`, drops remote
 connection environment variables and checks `info --format=json` for rootless
 mode. Production execution requires a non-root service account. Discovery uses
-JSON list/inspect output. Create uses only the canonical image, never pulls, does
-not mount host paths or engine sockets, disables implicit image volumes and uses
-no privileged/nested engine. This slice uses no network, drops container
-capabilities and enables no-new-privileges, and applies the configured P4a resource limits. Process injection remains a
+JSON list/inspect output. Canonical create uses the installed canonical image
+and never pulls. Dockerfile creation uses the separately checked trusted build capability. Neither path mounts
+host paths or engine sockets or uses a privileged/nested engine. Workspace
+containers use no network, ignore implicit image volumes, drop capabilities,
+enable no-new-privileges and apply the configured P4a resource limits. Process
+injection remains a
 separate trusted runtime capability; see the admission contract.
 Start/remove operate on full immutable container IDs resolved and validated for
 exact W/G; neither logical-key deletion nor bulk/prune operations exist. Output

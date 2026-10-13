@@ -20,7 +20,10 @@ Embedded servers can register `exec`, `read_text` and `write_text` with a truste
 admission callback; see [the tool contract](docs/tools.md) for request/result limits,
 uncertain completion and runtime capability requirements. The landed Podman adapter
 implements a trusted Linux process/cgroup probe and rejects unverifiable state.
-They are tested with local fakes; real-host verification remains separate.
+Dockerfile-only asynchronous candidates use the same lifecycle and admission
+substrates; see [the build contract](docs/build.md) for source policy, publication
+fencing, restart and exact cleanup. They are tested with local fakes; real-host
+verification remains separate.
 
 ## Go baseline
 

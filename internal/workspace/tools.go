@@ -202,10 +202,7 @@ type ExecOutcome struct {
 func (s *Service) runTool(ctx context.Context, identity Identity, e Exact, r ExecRequest, stdout, stderr io.Writer) (ExecOutcome, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.toolTimeout)
 	defer cancel()
-	runtime, ok := s.runtime.(ExecRuntime)
-	if !ok {
-		return ExecOutcome{}, toolError("unsupported", "Runtime execution capability is unavailable.", nil)
-	}
+	runtime, supported := s.runtime.(ExecRuntime)
 	if err := ctx.Err(); err != nil {
 		return ExecOutcome{}, mapToolError(err)
 	}
@@ -218,6 +215,26 @@ func (s *Service) runTool(ctx context.Context, identity Identity, e Exact, r Exe
 	}
 	finished := make(chan result, 1)
 	go func() {
+		// Keep lifecycle admission within the bounded waiter. A busy lifecycle
+		// operation must not turn this preflight into an unbounded tool wait.
+		s.mu.Lock()
+		var admissionErr error
+		if err := ctx.Err(); err != nil {
+			admissionErr = err
+		} else if err := s.admitted(identity); err != nil {
+			admissionErr = err
+		} else if identity.key != e.Workspace || s.entries[e.Workspace] != e {
+			admissionErr = ErrStaleGeneration
+		} else if s.records[e].Phase != Present {
+			admissionErr = ErrNotReady
+		} else if !supported {
+			admissionErr = toolError("unsupported", "Runtime execution capability is unavailable.", nil)
+		}
+		s.mu.Unlock()
+		if admissionErr != nil {
+			finished <- result{err: admissionErr}
+			return
+		}
 		outcome, err := s.awaitTool(ctx, runtime, identity, e, r, stdout, stderr)
 		finished <- result{outcome, err}
 	}()

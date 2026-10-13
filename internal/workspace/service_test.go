@@ -249,7 +249,7 @@ func TestPersistenceFaultClosesAdmission(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s.save = func(string, string, map[WorkspaceKey]Exact, map[Exact]Lifetime, bool, BackendState) error {
+			s.save = func(string, string, map[WorkspaceKey]Exact, map[Exact]Lifetime, bool, BackendState, map[Exact]GenerationRecord) error {
 				return injected
 			}
 			if operation == "create" {

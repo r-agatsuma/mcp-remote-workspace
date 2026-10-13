@@ -11,12 +11,13 @@ import (
 )
 
 type journal struct {
-	Version        int          `json:"version"`
-	Image          string       `json:"image"`
-	Entries        []Exact      `json:"entries"`
-	Lifetimes      []Lifetime   `json:"lifetimes,omitempty"`
-	StorageBlocked bool         `json:"storage_blocked,omitempty"`
-	Backend        BackendState `json:"backend"`
+	Version        int                `json:"version"`
+	Image          string             `json:"image"`
+	Entries        []Exact            `json:"entries"`
+	Lifetimes      []Lifetime         `json:"lifetimes,omitempty"`
+	StorageBlocked bool               `json:"storage_blocked,omitempty"`
+	Backend        BackendState       `json:"backend"`
+	Generations    []GenerationRecord `json:"generations,omitempty"`
 }
 
 func readJournal(path, image string) (map[WorkspaceKey]Exact, error) {
@@ -57,7 +58,7 @@ func readAdmissionJournal(path, image string) (map[WorkspaceKey]Exact, map[Exact
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return nil, nil, false, BackendState{}, errors.New("trailing journal data")
 	}
-	if (state.Version != 1 && state.Version != 2) || state.Image != image {
+	if (state.Version != 1 && state.Version != 2 && state.Version != 3) || state.Image != image {
 		return nil, nil, false, BackendState{}, errors.New("journal version or canonical image mismatch")
 	}
 	for _, e := range state.Entries {
@@ -82,20 +83,23 @@ func readAdmissionJournal(path, image string) (map[WorkspaceKey]Exact, map[Exact
 	if len(lifetimes) != len(entries) {
 		return nil, nil, false, BackendState{}, errors.New("generation chronology missing; operator recovery required")
 	}
+	if _, err := validateGenerationRecords(state.Generations, entries, state.Version); err != nil {
+		return nil, nil, false, BackendState{}, err
+	}
 	return entries, lifetimes, state.StorageBlocked, state.Backend, nil
 }
 
 // writeJournal commits intent before runtime mutation. A failure, including an
 // uncertain directory sync, poisons admission until a new startup reconciles.
 func writeJournal(path, image string, entries map[WorkspaceKey]Exact) (err error) {
-	return writeJournalState(path, image, entries, nil, false, BackendState{})
+	return writeJournalState(path, image, entries, nil, false, BackendState{}, nil)
 }
 
 func writeAdmissionJournal(path, image string, entries map[WorkspaceKey]Exact, lifetimes map[Exact]Lifetime, blocked bool, backend BackendState) error {
-	return writeJournalState(path, image, entries, lifetimes, blocked, backend)
+	return writeJournalState(path, image, entries, lifetimes, blocked, backend, nil)
 }
 
-func writeJournalState(path, image string, entries map[WorkspaceKey]Exact, lifetimes map[Exact]Lifetime, blocked bool, backend BackendState) (err error) {
+func writeJournalState(path, image string, entries map[WorkspaceKey]Exact, lifetimes map[Exact]Lifetime, blocked bool, backend BackendState, records map[Exact]GenerationRecord) (err error) {
 	state := journal{Version: 1, Image: image, Entries: make([]Exact, 0, len(entries)), StorageBlocked: blocked, Backend: backend}
 	if lifetimes != nil {
 		state.Version = 2
@@ -103,6 +107,15 @@ func writeJournalState(path, image string, entries map[WorkspaceKey]Exact, lifet
 			state.Lifetimes = append(state.Lifetimes, life)
 		}
 		sort.Slice(state.Lifetimes, func(i, j int) bool { return state.Lifetimes[i].Exact.Workspace < state.Lifetimes[j].Exact.Workspace })
+	}
+	if records != nil {
+		state.Version = 3
+		for _, record := range records {
+			state.Generations = append(state.Generations, record)
+		}
+		sort.Slice(state.Generations, func(i, j int) bool {
+			return state.Generations[i].Exact.Workspace < state.Generations[j].Exact.Workspace
+		})
 	}
 	for _, e := range entries {
 		state.Entries = append(state.Entries, e)
@@ -131,4 +144,37 @@ func writeJournalState(path, image string, entries map[WorkspaceKey]Exact, lifet
 	}
 	defer func() { err = errors.Join(err, dir.Close()) }()
 	return dir.Sync()
+}
+
+func writeLifecycleJournal(path, image string, entries map[WorkspaceKey]Exact, lifetimes map[Exact]Lifetime, blocked bool, backend BackendState, records map[Exact]GenerationRecord) error {
+	return writeJournalState(path, image, entries, lifetimes, blocked, backend, records)
+}
+
+func readGenerationRecords(path string, entries map[WorkspaceKey]Exact, image string) (map[Exact]GenerationRecord, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[Exact]GenerationRecord{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var state journal
+	if err = json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	records, err := validateGenerationRecords(state.Generations, entries, state.Version)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range records {
+		if !r.Custom && r.Image != image {
+			return nil, errors.New("generation canonical image mismatch")
+		}
+	}
+	if state.Version < 3 {
+		for _, e := range entries {
+			records[e] = GenerationRecord{Exact: e, Phase: Present, Image: image}
+		}
+	}
+	return records, nil
 }

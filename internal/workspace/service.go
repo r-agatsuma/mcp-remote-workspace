@@ -17,8 +17,13 @@ var ErrStaleGeneration = errors.New("stale workspace generation")
 type State string
 
 const (
-	Absent  State = "ABSENT"
-	Present State = "PRESENT"
+	Absent     State = "ABSENT"
+	Present    State = "PRESENT"
+	Processing State = "PROCESSING"
+	Building   State = "BUILDING"
+	Finalizing State = "FINALIZING"
+	Failed     State = "FAILED"
+	Deleting   State = "DELETING"
 )
 
 type Config struct {
@@ -68,7 +73,7 @@ type Service struct {
 	ready   bool
 	entries map[WorkspaceKey]Exact
 	// Fault injection remains private; production uses the durable writer.
-	save           func(string, string, map[WorkspaceKey]Exact, map[Exact]Lifetime, bool, BackendState) error
+	save           func(string, string, map[WorkspaceKey]Exact, map[Exact]Lifetime, bool, BackendState, map[Exact]GenerationRecord) error
 	policy         Policy
 	dataDir        string
 	storage        StorageProbe
@@ -78,6 +83,9 @@ type Service struct {
 	backend        *BackendLedger
 	injections     map[Exact]*BackendPermit
 	toolTimeout    time.Duration
+	records        map[Exact]GenerationRecord
+	builds         map[Exact]*activeBuild
+	buildWG        sync.WaitGroup
 }
 
 // Open obtains the account-wide singleton before constructing or discovering
@@ -143,8 +151,8 @@ func open(ctx context.Context, cfg Config, factory func() Runtime, lockPath stri
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{runtime: factory(), image: cfg.Image, path: filepath.Join(cfg.StateDir, "journal.json"), lock: lock, save: writeAdmissionJournal,
-		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout}
+	s := &Service{runtime: factory(), image: cfg.Image, path: filepath.Join(cfg.StateDir, "journal.json"), lock: lock, save: writeLifecycleJournal,
+		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout, records: make(map[Exact]GenerationRecord), builds: make(map[Exact]*activeBuild)}
 	if s.runtime == nil {
 		return nil, errors.New("runtime is required")
 	}
@@ -167,6 +175,22 @@ func (s *Service) reconcile(ctx context.Context) error {
 			return errors.New("host clock predates durable activity; operator recovery required")
 		}
 	}
+	records, err := readGenerationRecords(s.path, entries, s.image)
+	if err != nil {
+		return err
+	}
+	s.entries, s.lifetimes, s.records = entries, lifetimes, records
+	for e, r := range records {
+		if r.Custom {
+			if _, ok := s.runtime.(BuildRuntime); !ok {
+				return ErrNotReady
+			}
+		}
+		if r.Phase == Building || r.Phase == Finalizing {
+			r.Phase = Failed
+			s.records[e] = r
+		}
+	}
 	if err := s.backend.restore(backend, entries); err != nil {
 		return err
 	}
@@ -181,7 +205,10 @@ func (s *Service) reconcile(ctx context.Context) error {
 	if err := s.runtime.Initialize(ctx); err != nil {
 		return err
 	}
-	if _, err := discover(ctx, s.runtime, entries, s.image); err != nil {
+	if _, err := s.discover(ctx); err != nil {
+		return err
+	}
+	if err := s.reconcileBuildState(ctx); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -190,13 +217,24 @@ func (s *Service) reconcile(ctx context.Context) error {
 	// Missing runtime objects retain PRESENT intent: startup does not repair,
 	// restart, replace, or erase incomplete create/destroy operations.
 	s.entries, s.lifetimes, s.storageBlocked, s.ready = entries, lifetimes, blocked, true
+	if err := s.commit(clone(s.entries)); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (s *Service) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.ready = false
+	for _, b := range s.builds {
+		b.cancel()
+	}
+	s.mu.Unlock()
+	// Keep singleton ownership until every local worker has stopped. No durable
+	// continuation is promised; restart fences the unfinished journal candidate.
+	s.buildWG.Wait()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.lock == nil {
 		return nil
 	}
@@ -221,8 +259,8 @@ func (s *Service) Status(identity Identity) (State, error) {
 	if err := s.admitted(identity); err != nil {
 		return "", err
 	}
-	if _, ok := s.entries[identity.key]; ok {
-		return Present, nil
+	if e, ok := s.entries[identity.key]; ok {
+		return publicPhase(s.records[e].Phase), nil
 	}
 	return Absent, nil
 }
@@ -236,7 +274,7 @@ func clone(entries map[WorkspaceKey]Exact) map[WorkspaceKey]Exact {
 }
 
 func (s *Service) commit(next map[WorkspaceKey]Exact) error {
-	if err := s.save(s.path, s.image, next, s.lifetimes, s.storageBlocked, s.backend.state()); err != nil {
+	if err := s.save(s.path, s.image, next, s.lifetimes, s.storageBlocked, s.backend.state(), s.records); err != nil {
 		s.ready = false
 		return err
 	}
@@ -257,12 +295,15 @@ func (s *Service) Create(ctx context.Context, identity Identity) (Exact, error) 
 		if err := s.touch(current); err != nil {
 			return Exact{}, err
 		}
+		if s.records[current].Phase != Present {
+			return current, ErrNotReady
+		}
 		return current, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return Exact{}, err
 	}
-	if _, err := discover(ctx, s.runtime, s.entries, s.image); err != nil {
+	if _, err := s.discover(ctx); err != nil {
 		return Exact{}, err
 	}
 	if err := s.storageAdmission(ctx); err != nil {
@@ -284,6 +325,7 @@ func (s *Service) Create(ctx context.Context, identity Identity) (Exact, error) 
 	}
 	now := s.now()
 	s.lifetimes[e] = Lifetime{e, now, now}
+	s.records[e] = GenerationRecord{Exact: e, Phase: Present, Image: s.image}
 	if err := s.commit(next); err != nil {
 		_ = permit.Resolve(e, DefinitelyCompleted) // backend was never started
 		return Exact{}, err
@@ -296,7 +338,7 @@ func (s *Service) Create(ctx context.Context, identity Identity) (Exact, error) 
 	if err != nil {
 		return e, err
 	}
-	objects, err := discover(ctx, s.runtime, s.entries, s.image)
+	objects, err := s.discover(ctx)
 	if err != nil {
 		return e, err
 	}
@@ -353,14 +395,20 @@ func (s *Service) WithGeneration(e Exact, callback func() error) error {
 	if s.entries[e.Workspace] != e {
 		return ErrStaleGeneration
 	}
+	if s.records[e].Phase != Present {
+		return ErrNotReady
+	}
 	return callback()
 }
 
 func (s *Service) destroy(ctx context.Context, e Exact) error {
+	if s.records[e].Custom {
+		return s.destroyCustom(ctx, e)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := discover(ctx, s.runtime, s.entries, s.image); err != nil {
+	if _, err := s.discover(ctx); err != nil {
 		return err
 	}
 	if s.backend.has(e) {
@@ -381,7 +429,7 @@ func (s *Service) destroy(ctx context.Context, e Exact) error {
 	if err != nil {
 		return err
 	}
-	objects, err := discover(ctx, s.runtime, s.entries, s.image)
+	objects, err := s.discover(ctx)
 	if err != nil {
 		return err
 	}
@@ -391,5 +439,6 @@ func (s *Service) destroy(ctx context.Context, e Exact) error {
 	next := clone(s.entries)
 	delete(next, e.Workspace)
 	delete(s.lifetimes, e)
+	delete(s.records, e)
 	return s.commit(next)
 }

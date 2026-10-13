@@ -201,7 +201,7 @@ func (p *Podman) List(ctx context.Context) ([]Object, error) {
 		if _, owned, err := classify(o); err != nil || !owned {
 			return nil, errors.New("unrecognized service runtime object")
 		}
-		if o.Image != p.image {
+		if o.Image != p.image && o.Image != buildImageName(Exact{WorkspaceKey(o.Labels[workspaceLabel]), Generation(o.Labels[generationLabel])}) {
 			return nil, errors.New("runtime object has a different canonical image")
 		}
 		objects = append(objects, o)
@@ -217,7 +217,7 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) (err error) 
 	if err := e.validate(); err != nil {
 		return err
 	}
-	if !validImage(image) || image != p.image {
+	if image != p.image && image != buildImageName(e) {
 		return errors.New("digest-pinned canonical image required")
 	}
 	args := []string{"container", "create", "--pull=never", "--name", objectName(e),

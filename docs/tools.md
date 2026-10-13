@@ -2,7 +2,8 @@
 
 `Service.Exec`, `ReadText` and `WriteText` require a trusted `Identity` and the
 already admitted `Exact` PRESENT generation. They never create, repair, restart,
-retarget or retry a generation. `RegisterTools(server, service, admit)` installs
+retarget or retry a generation. Dockerfile candidates without PRESENT return
+bounded not-ready errors, including during asynchronous container finalization. `RegisterTools(server, service, admit)` installs
 the public MCP `exec`, `read_text` and `write_text` tools on an embedded server.
 The host-supplied admission callback must attest identity and bind the exact
 generation; caller arguments and unverified wire `_meta` cannot supply authority.

@@ -197,10 +197,13 @@ func (s *Service) BeginBackend(e Exact, kind string) (BackendOperation, error) {
 	if !now.Before(life.Activity.Add(s.policy.IdleTTL)) {
 		return BackendOperation{}, ErrIdleTTL
 	}
+	if s.records[e].Phase != Present {
+		return BackendOperation{}, ErrNotReady
+	}
 	if s.backend.hasLifecycle(e) {
 		return BackendOperation{}, ErrOutcomeUnknown
 	}
-	if kind == "injection" || kind == "create" || kind == "destroy" {
+	if kind == "injection" || kind == "create" || kind == "destroy" || kind == "build-cleanup" {
 		return BackendOperation{}, errors.New("use the lifecycle or process injection gate")
 	}
 	permit, err := s.backend.Acquire(e, kind)
@@ -223,6 +226,28 @@ func (s *Service) RecoverBackend(op BackendOperation, completion Completion) err
 	defer s.mu.Unlock()
 	if !s.ready {
 		return ErrNotReady
+	}
+	if r := s.records[op.Exact]; r.Custom && (r.Phase == Building || r.Phase == Finalizing) {
+		// Recovery fences publication before resolving accounting. Only an exact
+		// live operation may revoke this candidate; stale operation IDs have no power.
+		found := false
+		for _, live := range s.backend.Pending() {
+			if live == op {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrStaleGeneration
+		}
+		r.Phase = Failed
+		s.records[op.Exact] = r
+		if err := s.commit(clone(s.entries)); err != nil {
+			return err
+		}
+		if b := s.builds[op.Exact]; b != nil {
+			b.cancel()
+		}
 	}
 	if err := s.backend.Recover(op, completion); err != nil {
 		return err
@@ -256,6 +281,9 @@ func (s *Service) Inject(ctx context.Context, identity Identity, e Exact, submit
 	}
 	if s.injections[e] != nil {
 		return BackendOperation{}, ErrInjectionBusy
+	}
+	if s.records[e].Phase != Present {
+		return BackendOperation{}, ErrNotReady
 	}
 	if s.backend.hasLifecycle(e) {
 		return BackendOperation{}, ErrOutcomeUnknown

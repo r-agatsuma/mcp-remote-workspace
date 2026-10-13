@@ -161,7 +161,7 @@ func (p *Podman) inspectProcess(ctx context.Context, e Exact, id string) (contai
 		return v, err
 	}
 	actual, owned, err := classify(v.object())
-	if err != nil || !owned || actual != e || v.ImageName != p.image ||
+	if err != nil || !owned || actual != e || (v.ImageName != p.image && v.ImageName != buildImageName(e)) ||
 		!v.State.Running || v.State.Status != "running" || v.State.Paused ||
 		v.State.Restarting || v.State.Dead || v.State.Pid <= 0 || v.State.StartedAt == "" {
 		return v, ErrProcessUnsafe
