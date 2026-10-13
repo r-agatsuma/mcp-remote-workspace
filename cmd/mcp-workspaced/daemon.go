@@ -17,7 +17,11 @@ func runDaemon(ctx context.Context, cfg workspace.Config) (err error) {
 		if cfg.Policy != nil {
 			policy = *cfg.Policy
 		}
-		return workspace.NewPodmanWithPolicy(cfg.PodmanPath, cfg.Image, policy)
+		dataDir := cfg.DataDir
+		if dataDir == "" {
+			dataDir = cfg.StateDir
+		}
+		return workspace.NewPodmanWithBuildConfig(cfg.PodmanPath, cfg.Image, policy, workspace.PodmanBuildConfig{BuildahPath: cfg.BuildahPath, DataDir: dataDir, DNS: cfg.BuildDNS})
 	})
 	if err != nil {
 		return err

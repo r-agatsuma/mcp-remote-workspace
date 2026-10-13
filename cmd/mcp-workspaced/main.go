@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +25,8 @@ func main() {
 	stateDir := flag.String("state-dir", "", "private absolute lifecycle journal directory")
 	image := flag.String("image", "", "canonical locally installed image pinned with @sha256:digest")
 	podmanPath := flag.String("podman", "/usr/bin/podman", "absolute host-side rootless Podman executable")
+	buildahPath := flag.String("buildah", "/usr/bin/buildah", "absolute host-side rootless Buildah executable for exact storage cleanup")
+	buildDNS := flag.String("build-dns", "", "comma-separated trusted public IP default resolvers for build containers (empty uses runtime defaults)")
 	dataDir := flag.String("data-dir", "", "absolute shared disposable Data pool path (default state-dir filesystem)")
 	toolTimeout := flag.Duration("tool-timeout", 30*time.Second, "positive exec/file control-plane lifetime")
 	policy := workspace.ReferencePolicy()
@@ -64,7 +67,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced: tool-timeout must be positive")
 			os.Exit(2)
 		}
-		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}); err != nil {
+		var resolvers []string
+		if *buildDNS != "" {
+			resolvers = strings.Split(*buildDNS, ",")
+		}
+		if err := runDaemon(ctx, workspace.Config{BuildahPath: *buildahPath, BuildDNS: resolvers, StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}); err != nil {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
 			os.Exit(1)
 		}

@@ -29,6 +29,8 @@ const (
 type Config struct {
 	StateDir    string
 	Image       string           // digest-pinned canonical image, supplied by the operator
+	BuildahPath string           // absolute storage/build-tool executable; empty selects /usr/bin/buildah
+	BuildDNS    []string         // trusted public build-container default resolvers; empty uses runtime defaults
 	PodmanPath  string           // absolute host-side executable path
 	DataDir     string           // shared disposable pool; defaults to StateDir
 	Policy      *Policy          // nil selects reference-host defaults; copied at Open
@@ -49,6 +51,9 @@ func DefaultStateDir() (string, error) {
 }
 
 func (c Config) Validate() error {
+	if err := (PodmanBuildConfig{BuildahPath: c.BuildahPath, DataDir: c.DataDir, DNS: c.BuildDNS}).Validate(); err != nil {
+		return err
+	}
 	if c.ToolTimeout < 0 {
 		return errors.New("tool timeout must be positive or zero for default")
 	}

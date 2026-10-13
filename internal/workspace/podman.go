@@ -52,6 +52,8 @@ func (c localCLI) run(ctx context.Context, args ...string) ([]byte, error) {
 
 type Podman struct {
 	runner      commandRunner
+	buildah     commandRunner
+	buildConfig PodmanBuildConfig
 	image       string
 	initialized bool
 	policy      *Policy
@@ -64,7 +66,17 @@ func NewPodman(path, image string) *Podman {
 }
 
 func NewPodmanWithPolicy(path, image string, policy Policy) *Podman {
-	return &Podman{runner: localCLI{path}, image: image, policy: &policy}
+	return NewPodmanWithBuildConfig(path, image, policy, PodmanBuildConfig{})
+}
+
+// NewPodmanWithBuildConfig accepts only trusted service/deployment settings.
+// Embedded hosts must supply the same DataDir used by Service for build ownership.
+func NewPodmanWithBuildConfig(path, image string, policy Policy, cfg PodmanBuildConfig) *Podman {
+	if cfg.BuildahPath == "" {
+		cfg.BuildahPath = "/usr/bin/buildah"
+	}
+	cfg.DNS = append([]string(nil), cfg.DNS...)
+	return &Podman{runner: localCLI{path}, buildah: localBuildahCLI{cfg.BuildahPath}, image: image, policy: &policy, buildConfig: cfg}
 }
 
 func (p *Podman) resourcePolicy() Policy {
@@ -76,6 +88,9 @@ func (p *Podman) resourcePolicy() Policy {
 
 func (p *Podman) Initialize(ctx context.Context) error {
 	p.initialized = false
+	if err := p.buildConfig.Validate(); err != nil {
+		return err
+	}
 	if err := p.resourcePolicy().Validate(); err != nil {
 		return err
 	}

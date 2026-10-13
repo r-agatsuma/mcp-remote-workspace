@@ -62,6 +62,29 @@ There is no DNS pre-resolution boundary, redirect parser, proxy, firewall helper
 or extra privilege in this implementation. The adapter selects private rootless
 networking, disables inherited proxy settings and drops capabilities.
 
+## Trusted build defaults
+
+`Config.BuildDNS` / `PodmanBuildConfig.DNS` accepts up to eight public IP literals
+from service/deployment configuration. The daemon accepts the same setting with
+`-build-dns=IP,IP`. No resolver address is built into production defaults. Empty
+configuration leaves default resolution to the trusted runtime/deployment. Explicit
+settings become separate `podman build --dns=IP` arguments; they affect build RUN
+containers, not the host resolver used by image pulls. Loopback, private, link-local,
+ULA, metadata and other non-public address classes are rejected. The inherited
+UID OUTPUT policy still denies prohibited actual destinations, including service
+host and other-workspace addresses; this setting creates no DNS exception.
+
+Dockerfile ARG/ENV/RUN values cannot change these defaults or host configuration.
+RUN code retains the existing public-Internet capability, including other public
+DNS/DoH endpoints. Host-side resolver provisioning and the eventual systemd/Ansible
+mechanism remain deployment responsibilities.
+
+Embedded hosts configure `NewPodmanWithBuildConfig` with the service's exact
+`DataDir`, resource policy and trusted settings. `Config.BuildahPath` / daemon
+`-buildah` selects an absolute local Buildah executable (default `/usr/bin/buildah`)
+under the same non-root account, environment and storage as Podman. This is a
+storage inspection/removal tool, with no remote transport or additional privilege.
+
 ## Ownership, completion and cleanup
 
 ABSENT creation allocates fresh G, acquires the shared generation/backend budgets,
@@ -69,6 +92,11 @@ and durably records BUILDING before creating Data state or submitting build work
 The Data path is `builds/mcpws-v1-<W>-<G>` beneath operator DataDir. Its `context`
 directory contains only the compiled `Dockerfile`; bounded stdout/stderr (64 KiB
 head/tail per stream) and operational temporary state are outside that context.
+Outside `context`, the adapter creates a private, empty `default-mounts.conf`
+and a small `build-container.conf` module that selects it using `podman --module`.
+The empty file supplies no host mounts. Its exact W/G path is saved as Buildah's
+`DefaultMountsFilePath` when each working container is initialized, before RUN;
+image labels are not relied on for interrupted working-container ownership.
 No arbitrary local files can become caller COPY inputs. Ordinary context COPY
 instructions have only Dockerfile available, and typically fail when other files
 are requested. Same-file stage COPY remains supported.
@@ -101,8 +129,17 @@ Trusted `PendingBackend` / `RecoverBackend` evidence is required to resolve
 uncertain engine work before cleanup. Local CLI cancellation or an abnormal build
 exit alone does not prove that Buildah work stopped.
 
+Cleanup separates ordinary Podman objects from external storage objects using
+bounded inventories. External objects use `buildah inspect --type=container` and
+full immutable IDs; only a saved mounts-file path beneath the configured exact
+Data/W/G path establishes attribution. Names, base-image IDs, inventory deltas and
+image labels alone do not grant external deletion authority. `buildah rm -- ID`
+removes only attributed G objects. Startup includes these objects in generation
+reconciliation even when no custom image was committed.
+
 Cleanup removes the exact container, exact owned custom/intermediate images and
-owned build containers, independently reads back runtime absence, and removes only
+owned external build containers, independently reads back storage/runtime absence,
+and removes only
 G's Data subtree before ABSENT. Image deletion uses immutable IDs and `--no-prune`;
 there is no global/wildcard prune. Other generations and unrelated Data remain.
 Missing/inconsistent ownership, unidentified external engine containers or dangling images, retained
@@ -120,6 +157,20 @@ cleanup ownership, shared admission and bounded logs/tools. These are local sour
 and adapter-contract evidence. Real host Podman builds/image fetches and effective
 network/cgroup enforcement are the implementation-time verification responsibility
 of Issue #72 against the delivered exact revision.
+
+The runtime must support `podman --module`, propagation of the configured
+`default_mounts_file` into Buildah builder metadata, and the Buildah inspect
+`Type`/`ContainerID`/`DefaultMountsFilePath` shape. Missing or inconsistent metadata
+fails closed; existing residue created without this attribution cannot be guessed
+into ownership. Real support and cancellation cleanup must be verified in #72
+against the revised exact source revision, together with public default DNS.
+
+The module and storage inspection contracts follow the official
+[containers.conf documentation](https://github.com/containers/common/blob/main/docs/containers.conf.5.md),
+[Podman build implementation](https://github.com/containers/podman/blob/main/cmd/podman/common/build.go),
+[Buildah builder metadata](https://github.com/containers/buildah/blob/main/buildah.go),
+[Buildah inspect documentation](https://github.com/containers/buildah/blob/main/docs/buildah-inspect.1.md)
+and [Buildah removal documentation](https://github.com/containers/buildah/blob/main/docs/buildah-rm.1.md).
 
 The CLI options and image inspection shape follow the official
 [Podman build documentation](https://docs.podman.io/en/latest/markdown/podman-build.1.html)

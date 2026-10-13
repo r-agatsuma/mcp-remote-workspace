@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -170,6 +171,10 @@ func (p *Podman) BuildGenerations(ctx context.Context) ([]Exact, error) {
 	if err != nil {
 		return nil, err
 	}
+	containers, err := p.externalBuildContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
 	generations := []Exact{}
 	seen := map[Exact]bool{}
 	for _, v := range values {
@@ -182,6 +187,12 @@ func (p *Podman) BuildGenerations(ctx context.Context) ([]Exact, error) {
 			generations = append(generations, e)
 		}
 	}
+	for _, v := range containers {
+		if !seen[v.Exact] {
+			seen[v.Exact] = true
+			generations = append(generations, v.Exact)
+		}
+	}
 	return generations, nil
 }
 
@@ -191,8 +202,11 @@ func (p *Podman) BuildGenerations(ctx context.Context) ([]Exact, error) {
 // privilege is introduced. Effective enforcement is real-host #72 evidence.
 func (p *Podman) Build(ctx context.Context, e Exact, plan BuildPlan, path string, stdout, stderr io.Writer) BackendResult {
 	fail := func(err error) BackendResult { return BackendResult{DefinitelyCompleted, err} }
-	if !p.initialized || e.validate() != nil {
+	if !p.initialized || e.validate() != nil || p.buildConfig.DataDir == "" || path != p.candidateBuildPath(e) || p.buildah == nil {
 		return fail(ErrNotReady)
+	}
+	if err := p.buildConfig.Validate(); err != nil {
+		return fail(err)
 	}
 	// Recheck known aliases immediately before any external consumption.
 	known, err := p.KnownBuildImages(ctx)
@@ -276,7 +290,18 @@ func (p *Podman) Build(ctx context.Context, e Exact, plan BuildPlan, path string
 	if err != nil || len(entries) != 1 || entries[0].Name() != "Dockerfile" || entries[0].Type()&os.ModeSymlink != 0 || entries[0].IsDir() {
 		return fail(ErrDockerfilePolicy)
 	}
-	args := []string{"build", "--file=-", "--pull=never", "--layers=false", "--no-cache", "--rm=true", "--force-rm=true", "--jobs=1", "--isolation=oci", "--network=private", "--http-proxy=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tag=" + buildImageName(e)}
+	// This trusted, empty mounts file is persisted in each Buildah builder at
+	// allocation, before RUN. Unlike image labels it survives an interrupted RUN.
+	// The module changes only that setting and supplies no host mount.
+	module, err := p.prepareBuildAttribution(e, path)
+	if err != nil {
+		return fail(err)
+	}
+	args := []string{"--module=" + module, "build", "--file=-", "--pull=never", "--layers=false", "--no-cache", "--rm=true", "--force-rm=true", "--jobs=1", "--isolation=oci", "--network=private", "--http-proxy=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tag=" + buildImageName(e)}
+	for _, resolver := range p.buildConfig.DNS {
+		ip, _ := netip.ParseAddr(resolver)
+		args = append(args, "--dns="+ip.Unmap().String())
+	}
 	policy := p.resourcePolicy()
 	args = append(args, "--memory="+strconv.FormatInt(policy.MemoryBytes, 10), "--memory-swap="+strconv.FormatInt(policy.MemoryBytes+policy.SwapBytes, 10), "--cpu-quota="+strconv.FormatInt(policy.CPUQuota, 10), "--ulimit=nofile="+strconv.FormatUint(policy.NoFile, 10)+":"+strconv.FormatUint(policy.NoFile, 10))
 	labels := objectLabels(e, buildImageName(e))
@@ -351,35 +376,21 @@ func unidentifiedBuildImage(v imageInspection, owned bool) bool {
 
 // CleanupBuild is intentionally conservative: unidentified external Buildah
 // containers prevent an absence claim. It never guesses ownership or prunes.
-func (p *Podman) CleanupBuild(ctx context.Context, e Exact, _ string) (err error) {
+func (p *Podman) CleanupBuild(ctx context.Context, e Exact, path string) (err error) {
 	defer func() { err = localRuntimeError(ctx, err) }()
 	if !p.initialized || e.validate() != nil {
 		return ErrNotReady
 	}
-	data, err := p.runner.run(ctx, "container", "list", "--all", "--external", "--no-trunc", "--format=json")
+	if p.buildConfig.DataDir == "" || path != p.candidateBuildPath(e) {
+		return ErrNotReady
+	}
+	objects, err := p.externalBuildContainers(ctx)
 	if err != nil {
 		return err
 	}
-	var objects []struct {
-		ID string `json:"Id"`
-	}
-	if json.Unmarshal(data, &objects) != nil || objects == nil || len(objects) > 4096 {
-		return ErrOutcomeUnknown
-	}
 	for _, item := range objects {
-		v, err := p.inspectContainer(ctx, item.ID)
-		if err != nil {
-			return err
-		}
-		if _, owned, classifyErr := classify(v.object()); owned && classifyErr == nil {
-			continue
-		}
-		actual, owned, err := buildLabelOwner(v.Config.Labels)
-		if err != nil || !owned {
-			return ErrOutcomeUnknown
-		}
-		if actual == e {
-			if _, err := p.runner.run(ctx, "container", "rm", "--force", "--", v.ID); err != nil {
+		if item.Exact == e {
+			if _, err := p.buildah.run(ctx, "rm", "--", item.ID); err != nil {
 				return err
 			}
 		}
@@ -420,24 +431,12 @@ func (p *Podman) CleanupBuild(ctx context.Context, e Exact, _ string) (err error
 			return ErrOutcomeUnknown
 		}
 	}
-	data, err = p.runner.run(ctx, "container", "list", "--all", "--external", "--no-trunc", "--format=json")
+	objects, err = p.externalBuildContainers(ctx)
 	if err != nil {
 		return err
 	}
-	objects = nil
-	if json.Unmarshal(data, &objects) != nil || objects == nil {
-		return ErrOutcomeUnknown
-	}
 	for _, item := range objects {
-		v, err := p.inspectContainer(ctx, item.ID)
-		if err != nil {
-			return err
-		}
-		if _, owned, classifyErr := classify(v.object()); owned && classifyErr == nil {
-			continue
-		}
-		actual, owned, err := buildLabelOwner(v.Config.Labels)
-		if err != nil || !owned || actual == e {
+		if item.Exact == e {
 			return ErrOutcomeUnknown
 		}
 	}
