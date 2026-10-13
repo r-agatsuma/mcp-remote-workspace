@@ -117,7 +117,7 @@ esac
 	}
 }
 
-func TestPodmanStillRequiresTrustedProcessProbe(t *testing.T) {
+func TestToolsStillRequireTrustedProcessProbe(t *testing.T) {
 	s, f, i, e := openTools(t, Config{})
 	// Exec capability alone cannot bypass the landed missing-probe behavior.
 	type noProbe struct {

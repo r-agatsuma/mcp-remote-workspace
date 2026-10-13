@@ -19,7 +19,7 @@ TTL and shared-pool storage controls are described in [the admission contract](d
 Embedded servers can register `exec`, `read_text` and `write_text` with a trusted
 admission callback; see [the tool contract](docs/tools.md) for request/result limits,
 uncertain completion and runtime capability requirements. The landed Podman adapter
-continues to reject injection without a trusted process probe.
+implements a trusted Linux process/cgroup probe and rejects unverifiable state.
 They are tested with local fakes; real-host verification remains separate.
 
 ## Go baseline

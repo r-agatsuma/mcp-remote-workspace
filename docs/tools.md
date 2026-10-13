@@ -76,15 +76,35 @@ argv, sorted per-process env flags, stdin and separate bounded output sinks. It
 uses the snapshot's full immutable ID, never a workspace/container name. Killing
 the local CLI does not prove injected workload completion; cancellation, pipe loss
 and reserved Podman failure statuses 125–127 retain uncertain accounting.
-The landed Podman adapter **still lacks `ProcessProbe`**, so it fails closed at
-the injection gate until a trusted host process probe is supplied. This slice
-does not change that admission substrate or claim live Podman execution evidence.
+The production Podman adapter implements `ProcessProbe` on Linux and consumes
+the existing admission substrate. It freshly discovers exact ownership, inspects
+the full immutable ID, and checks running state, PID and start time against pinned
+procfs directories. It binds the actual PID membership to the reported resource
+cgroup, whose generated `libpod-<full-ID>.scope`, `libpod-<full-ID>` or
+`libpod-payload-<full-ID>` name must match the immutable object. PID membership
+may be in a descendant; `pids.current` is read at the resource root to count its
+entire task subtree. Limits are read from the actual member group through its
+ancestors, and CPU weight is read at the resource root. `cpu.max` bandwidth is
+normalized to Podman's 100 ms default period. Actual NOFILE soft/hard limits come
+from `/proc/<pid>/limits`, rather than desired runtime configuration.
+
+The probe opens only fixed host `/proc` and `/sys/fs/cgroup` roots, verifies their
+kernel filesystem types and a full unified cgroup mount, and bounds every read.
+It pins process/cgroup directory identities, repeats runtime inspection and
+process/resource observations, and rejects PID reuse, membership migration,
+cgroup replacement, changed limits, missing/ambiguous data or cancellation.
+The larger of both observed subtree task counts reaches the existing gate.
+Non-Linux hosts, partial cgroup mounts, unavailable controller files, frozen
+groups and mismatched policies fail closed without injection. Read-only probe
+failure attests no submitted workload and releases the existing reservation;
+uncertain exec completion retains it. No host path argument or workload mount
+is added, and this slice does not claim live Podman execution evidence.
 
 File operations run fixed `/bin/sh` helpers inside the container: bounded
 `head -c 1048577 -- "$1"` for reads and `cat > "$1"` for writes. Paths are
 positional arguments and content travels only through stdin. The image must
 provide these utilities. Symlinks resolve entirely inside the container filesystem
-namespace; production code introduces no host mounts or host file I/O for tools.
+namespace; file content operations introduce no host mounts or host file I/O.
 
 ## Local evidence
 
@@ -94,5 +114,8 @@ They cover exact-generation replacement and absence, all injection/backend gates
 timeout/cancellation and late recovery, detached acceptance, bounded head/tail
 output and encoding errors, strict public request decoding, file UTF-8/size/path
 and create/truncate/symlink behavior, partial writes, no replay and persisted
-unknown accounting. Fixture helper execution is not OCI validation. Real Podman
+unknown accounting. Procfs/cgroup fixtures and fault injection also exercise the
+ordinary production `*Podman` probe and all three tool paths, including inherited
+limits, subtree membership, PID/cgroup reuse and fail-closed behavior. Fixture
+helper/probe execution is not OCI validation. Real Podman
 verification of the delivered exact revision remains external Issue #71 scope.

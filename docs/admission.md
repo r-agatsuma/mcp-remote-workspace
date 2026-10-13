@@ -65,11 +65,12 @@ There is at most one unfinished injection per exact generation, including across
 restart. Outcome-uncertain lifecycle mutations also block injection and new backend
 work for that generation. Stale exact state and stale snapshots cannot authorize a replacement.
 
-P3a adds [exec/text tools](tools.md) consuming this gate and a streaming Podman exec
-adapter. The current Podman adapter still does not implement `ProcessProbe`;
-calling injection with it fails closed. Runtime process paths must supply this
-trusted capability and use the gate. Real PID/cgroup/OCI validation remains outside
-this local implementation's evidence.
+P3a adds [exec/text tools](tools.md) consuming this gate, a streaming Podman exec
+adapter and a production Linux `ProcessProbe`. The probe binds a full immutable
+container ID to fresh runtime state and actual procfs/cgroup v2 observations.
+Missing, mismatched or raced evidence fails closed. Runtime paths without this
+capability still cannot inject. Deterministic fixtures exercise the production
+probe; real PID/cgroup/OCI validation remains external evidence.
 
 ## Backend completion and recovery
 

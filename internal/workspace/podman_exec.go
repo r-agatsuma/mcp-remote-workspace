@@ -16,8 +16,8 @@ type execCommandRunner interface {
 }
 
 // StartExec consumes an already attested immutable snapshot; it never discovers
-// or targets a container by name. A missing ProcessProbe still fails closed at
-// Service.Inject, as in the landed P4a adapter contract.
+// or targets a container by name. Service.Inject obtains that snapshot from the
+// production ProcessProbe before permitting submission.
 func (p *Podman) StartExec(ctx context.Context, snapshot ProcessSnapshot, r ExecRequest, stdout, stderr io.Writer) (<-chan ExecOutcome, error) {
 	if !p.initialized {
 		return nil, CompletedBackendError(ErrNotReady)
