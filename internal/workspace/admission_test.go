@@ -970,7 +970,7 @@ func TestAdmissionJournalRejectsCorruptAuthorityBeforeRuntime(t *testing.T) {
 			if err := privateDir(cfg.StateDir); err != nil {
 				t.Fatal(err)
 			}
-			state := journal{Version: 2, Image: testImage, Entries: []Exact{e}, Lifetimes: []Lifetime{{e, now, now}}, Backend: BackendState{Next: 1}}
+			state := journal{Version: 2, Image: testImage, Entries: []Exact{e}, Lifetimes: []Lifetime{{Exact: e, Created: now, Activity: now}}, Backend: BackendState{Next: 1}}
 			tc.change(&state)
 			if err := os.WriteFile(filepath.Join(cfg.StateDir, "journal.json"), []byte(jsonText(t, state)), 0600); err != nil {
 				t.Fatal(err)

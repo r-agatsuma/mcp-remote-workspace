@@ -16,15 +16,21 @@ reconciles local state until shutdown; it opens no network listener and exposes 
 product tools. See [the lifecycle contract](docs/lifecycle.md) for configuration,
 trust boundaries and failure behavior. Reusable generation, process, backend,
 TTL and shared-pool storage controls are described in [the admission contract](docs/admission.md).
-Embedded servers can register `exec`, `read_text` and `write_text` with a trusted
+Embedded servers can register `workspace_create`, `workspace_destroy`, `exec`,
+`read_text` and `write_text` with a trusted
 admission callback; see [the tool contract](docs/tools.md) for request/result limits,
 uncertain completion and runtime capability requirements. The landed Podman adapter
 implements a trusted Linux process/cgroup probe and rejects unverifiable state.
 They are tested with local fakes; real-host verification remains separate.
+Optional Dockerfile text creates one asynchronous exact-generation candidate.
+Builds use the existing lifecycle, journal and admission controls, with rootless
+Podman/Buildah, pasta, a bounded systemd user slice and retained Data diagnostics.
+See [Dockerfile creation](docs/lifecycle.md#dockerfile-creation-p5) for behavior,
+host prerequisites and the separate canonical-host verification boundary.
 
 ## Go baseline
 
-`go.mod` records Go language/module minimum **1.25.0** (required by the pinned SDK)
+`go.mod` records Go language/module minimum **1.26.8** (required by the pinned Dockerfile parser)
 and preferred toolchain **go1.26.9**. Use `GOTOOLCHAIN=go1.26.9` for exact-toolchain
 validation; the `toolchain` directive alone permits an already newer Go toolchain.
 The Go command can download this toolchain when needed. Initial dependency and
@@ -40,6 +46,7 @@ gofmt -w cmd/mcp-workspaced/*.go internal/workspace/*.go
 go test ./...
 go test -race ./...
 go vet ./...
+go build ./...
 go build ./cmd/mcp-workspaced
 ./mcp-workspaced -smoke
 git diff --check

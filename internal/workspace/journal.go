@@ -26,9 +26,10 @@ func readJournal(path, image string) (map[WorkspaceKey]Exact, error) {
 
 // Lifetime is durable host-clock activity; absolute age never resets on restart.
 type Lifetime struct {
-	Exact    Exact     `json:"exact"`
-	Created  time.Time `json:"created"`
-	Activity time.Time `json:"activity"`
+	Exact    Exact        `json:"exact"`
+	Created  time.Time    `json:"created"`
+	Activity time.Time    `json:"activity"`
+	Build    *buildIntent `json:"build,omitempty"`
 }
 
 func readAdmissionJournal(path, image string) (map[WorkspaceKey]Exact, map[Exact]Lifetime, bool, BackendState, error) {
@@ -76,6 +77,9 @@ func readAdmissionJournal(path, image string) (map[WorkspaceKey]Exact, map[Exact
 		}
 		if _, duplicate := lifetimes[life.Exact]; duplicate {
 			return nil, nil, false, BackendState{}, errors.New("duplicate lifetime")
+		}
+		if life.Build != nil && !life.Build.valid() {
+			return nil, nil, false, BackendState{}, errors.New("invalid candidate intent")
 		}
 		lifetimes[life.Exact] = life
 	}

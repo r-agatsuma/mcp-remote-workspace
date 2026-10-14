@@ -12,10 +12,17 @@ import (
 )
 
 // ToolAdmission is supplied by trusted host ingress. It must bind the request
-// to an existing exact generation, without create or retry. Neither identity nor
+// to an existing exact generation for exec/files, without create or retry. For
+// workspace_create/destroy it may return a zero Exact; Service owns selection.
+// Neither identity nor
 // generation is a caller argument; unverified wire _meta is not trusted here.
 // It must honor context cancellation and must not submit runtime work itself.
 type ToolAdmission func(context.Context, *mcp.CallToolRequest) (Identity, Exact, error)
+
+type CreateRequest struct {
+	Dockerfile *string `json:"dockerfile,omitempty"`
+}
+type DestroyRequest struct{}
 
 // RegisterTools installs the public v0 tools without opening any transport.
 func RegisterTools(server *mcp.Server, service *Service, admit ToolAdmission) error {
@@ -30,6 +37,23 @@ func RegisterTools(server *mcp.Server, service *Service, admit ToolAdmission) er
 	}
 	stringType := map[string]any{"type": "string"}
 	definitions := []definition{
+		{"workspace_create", "Create a workspace, optionally from Dockerfile text, or observe its accepted candidate.", map[string]any{"dockerfile": stringType}, nil, func(ctx context.Context, i Identity, _ Exact, raw json.RawMessage) (any, error) {
+			var r CreateRequest
+			if err := decodeToolRequest(raw, &r); err != nil {
+				return nil, err
+			}
+			return service.CreateWorkspace(ctx, i, r.Dockerfile)
+		}},
+		{"workspace_destroy", "Destroy the exact current workspace and its candidate state.", map[string]any{}, nil, func(ctx context.Context, i Identity, _ Exact, raw json.RawMessage) (any, error) {
+			var r DestroyRequest
+			if err := decodeToolRequest(raw, &r); err != nil {
+				return nil, err
+			}
+			if err := service.Destroy(ctx, i); err != nil {
+				return nil, err
+			}
+			return map[string]string{"status": "ABSENT"}, nil
+		}},
 		{"exec", "Execute argv in the admitted container generation. Detached success attests native acceptance only.", map[string]any{
 			"argv": map[string]any{"type": "array", "items": stringType, "minItems": 1, "maxItems": MaxArgv},
 			"cwd":  stringType, "env": map[string]any{"type": "object", "additionalProperties": stringType},
@@ -57,9 +81,11 @@ func RegisterTools(server *mcp.Server, service *Service, admit ToolAdmission) er
 		}},
 	}
 	for _, d := range definitions {
-		server.AddTool(&mcp.Tool{Name: d.name, Description: d.description, InputSchema: map[string]any{
-			"type": "object", "properties": d.properties, "required": d.required, "additionalProperties": false,
-		}}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		schema := map[string]any{"type": "object", "properties": d.properties, "additionalProperties": false}
+		if len(d.required) != 0 {
+			schema["required"] = d.required
+		}
+		server.AddTool(&mcp.Tool{Name: d.name, Description: d.description, InputSchema: schema}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Share one deadline across host admission and the Service operation.
 			ctx, cancel := context.WithTimeout(ctx, service.toolTimeout)
 			defer cancel()
@@ -124,6 +150,10 @@ func decodeToolRequest(raw json.RawMessage, destination any, required ...string)
 	}
 	var allowed []string
 	switch destination.(type) {
+	case *CreateRequest:
+		allowed = []string{"dockerfile"}
+	case *DestroyRequest:
+		allowed = []string{}
 	case *ExecRequest:
 		allowed = []string{"argv", "cwd", "env", "stdin", "detach"}
 	case *ReadTextRequest:
