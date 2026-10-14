@@ -341,6 +341,9 @@ func (c localCLI) runBuild(ctx context.Context, dockerfile, temp string, stdout,
 	}
 	cmd.Env = append(cmd.Env, "TMPDIR="+temp)
 	cmd.Stdin = strings.NewReader(dockerfile)
+	// Service-supplied bounded Data writers are not *os.File: os/exec creates
+	// transient OS pipes and a fixed-size io.Copy buffer per stream. Wait joins
+	// both continuous drain loops; neither output is captured in memory here.
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {

@@ -97,7 +97,7 @@ ABSENT creation allocates fresh G, acquires the shared generation/backend budget
 and durably records BUILDING before creating Data state or submitting build work.
 The Data path is `builds/mcpws-v1-<W>-<G>` beneath operator DataDir. Its `context`
 directory contains only the compiled `Dockerfile`; bounded stdout/stderr (64 KiB
-head/tail per stream) and operational temporary state are outside that context.
+prefix per stream) and operational temporary state are outside that context.
 Outside `context`, the adapter creates a private `build-container.conf` module
 that resets pasta options using `podman --module`. The fixed network argument
 contains `--pid,<DataDir>/builds/mcpws-v1-<W>-<G>/pasta.pid`. Buildah saves this
@@ -110,9 +110,38 @@ No arbitrary local files can become caller COPY inputs. Ordinary context COPY
 instructions have only Dockerfile available, and typically fail when other files
 are requested. Same-file stage COPY remains supported.
 
+Before background submission, the service exclusively creates and opens private
+ordinary `stdout` and `stderr` Data files in that exact candidate directory. A
+preparation failure prevents submission and retains FAILED intent for cleanup.
+The child writes through bounded OS pipes created by `os/exec`; its service-owned
+copy loops continuously drain into the pre-opened bounded file writers. These
+pipes are transient transport, not durable log state. The copy loops use fixed
+buffers (32 KiB per stream with the pinned Go toolchain); the file writers retain
+no output buffers and never accumulate complete output in memory.
+
+Each writer stores at most the first 64 KiB, then discards excess while continuing
+to consume all output. Saturation neither cancels the build nor acquires another
+backend permit. A write failure latches failure, cancels the build, and continues
+discarding output during terminal handling. `cmd.Wait` joins the subprocess and
+both copy loops; copy errors, cancellation, or a pipe remaining open past the
+bounded wait leave backend completion unknown. Before lifecycle completion, the
+service synchronizes and closes both original log descriptors. Any log failure
+prevents PRESENT even if a trusted builder reports success.
+
+The admitted local worker owns its log drain and terminal file handling until
+both finish. Destroy, TTL, recovery and shutdown revoke publication before
+cancellation; even recovered backend accounting cannot release a still-active
+local drain's cleanup ownership. Closed stale writers cannot reopen a path or
+write into a later generation. Restart fences unfinished work and retains only
+the already written bounded diagnostics; it does not resume streams or promise
+every emitted byte. Exact log state is removed with G's Data subtree before
+ABSENT. No log limits or paths are caller-configurable, and no file-size rlimit,
+quota service or separate logging authority is used.
+
 The service owns a bounded local worker, independently of polling request
 cancellation. Trusted `BuildRuntime` methods use exact W/G and synchronous
-read-only inventory or terminal backend evidence. Successful completion reenters
+read-only inventory or terminal backend evidence; `Build` must join its writers
+before returning. Successful completion reenters
 the lifecycle lock, revalidates exact candidate authority, journals FINALIZING,
 and uses backend admission to create the exact container from
 `localhost/mcpws-generation-v1/<W>:<G>`. Container creation runs outside the lock
@@ -163,7 +192,10 @@ Local tests use fake builders/runtimes, stub commands, local executables and
 network-denial decision errors. They cover reference parsing, variable/stage/COPY
 resolution, inventory aliases, inherited triggers, pinned build inputs, repeated
 polling, failures, cancellation/late container creation, TTL, recovery, restart,
-cleanup ownership, shared admission and bounded logs/tools. These are local source
+cleanup ownership, shared admission and bounded logs/tools. Log tests exercise
+pre-submission ordinary files, preparation failure, output beyond capacity,
+allocation-free saturation, subprocess/drain completion fencing, write/sync
+failure, restart and late-writer isolation. These are local source
 and adapter-contract evidence. Real host Podman builds/image fetches and effective
 network/cgroup enforcement are the implementation-time verification responsibility
 of Issue #72 against the delivered exact revision.
@@ -172,7 +204,8 @@ The adapter targets Podman 4.9.3 / Buildah 1.33.5's explicit pasta path and insp
 `Type`/`ContainerID`/`NamespaceOptions` shape. The former `default_mounts_file`
 module setting is not TOML-configurable in the canonical containers/common
 version and is no longer used for attribution. Existing residue without the new
-saved namespace setting remains ambiguous and cannot be adopted. Real support,+cancellation cleanup and effective RUN networking/resources still require #72
+saved namespace setting remains ambiguous and cannot be adopted. Real support,
+cancellation cleanup and effective RUN networking/resources still require #72
 verification against the revised exact source revision.
 
 The propagation contract follows the versioned official sources:
@@ -184,13 +217,9 @@ The propagation contract follows the versioned official sources:
 [configuration fields](https://github.com/containers/common/blob/v0.57.4/pkg/config/config.go)
 and [configuration array overrides](https://github.com/containers/common/blob/v0.57.4/internal/attributedstring/slice.go).
 
-The primary build-log sink finding remains unresolved: output is currently
-captured in memory and the bounded retained files are written after Build returns.
-Pre-opened ordinary Data file descriptors plus a strict growth bound need an
-agreed enforcement mechanism. A process-wide file-size limit also constrains
-engine/build file writes; a monitoring cutoff permits transient overshoot and
-cannot bound writes by uncertain surviving workers. Neither behavior has been
-introduced as an implicit change to the build contract.
+Real Podman streaming/resource behavior, including cancellation with inherited
+pipe descriptors, remains #72 verification against the delivered exact revision.
+Local stub execution does not establish real engine behavior.
 
 The CLI options and image inspection shape follow the official
 [Podman build documentation](https://docs.podman.io/en/latest/markdown/podman-build.1.html)

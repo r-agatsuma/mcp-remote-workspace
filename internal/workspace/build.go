@@ -63,8 +63,11 @@ type CreateResult struct {
 }
 
 // BuildRuntime is a trusted host-side capability. Build returns only after its
-// worker has exited; definite completion additionally attests no surviving
-// engine work. Unknown results retain admission until trusted recovery.
+// worker and stdout/stderr drain loops have exited; no writer may be used after
+// return. Definite completion additionally attests no surviving engine work.
+// The service supplies pre-opened bounded Data log writers and finalizes them
+// before releasing worker ownership. Unknown results retain admission until
+// trusted recovery.
 // KnownBuildImages includes all service-owned current and historical aliases.
 // BuildGenerations is a synchronous, read-only ownership inventory used to reject
 // orphan image intent on startup. Neither probe leaves backend work on return.
@@ -149,49 +152,56 @@ func (s *Service) CreateDockerfile(ctx context.Context, identity Identity, docke
 		return CreateResult{}, err
 	}
 	// Persist intent before allocating Data state, so crashes leave fenced intent.
-	if err = s.prepareBuild(e, plan); err != nil {
+	buildCtx, cancel := context.WithCancel(context.Background())
+	logs, err := s.prepareBuild(e, plan, cancel)
+	if err != nil {
+		cancel()
 		_ = permit.Resolve(e, DefinitelyCompleted)
 		r := s.records[e]
 		r.Phase = Failed
 		s.records[e] = r
 		return CreateResult{Failed, e}, errors.Join(err, s.commit(clone(s.entries)))
 	}
-	buildCtx, cancel := context.WithCancel(context.Background())
 	s.builds[e] = &activeBuild{cancel: cancel, permit: permit, running: true}
 	s.buildWG.Add(1)
-	go s.completeBuild(buildCtx, runtime, e, plan, permit)
+	go s.completeBuild(buildCtx, runtime, e, plan, permit, logs)
 	return CreateResult{Processing, e}, nil
 }
-func (s *Service) prepareBuild(e Exact, plan BuildPlan) error {
+func (s *Service) prepareBuild(e Exact, plan BuildPlan, cancel context.CancelFunc) (*buildLogs, error) {
 	if err := privateDir(s.dataDir); err != nil {
-		return err
+		return nil, err
 	}
 	if err := privateDir(filepath.Join(s.dataDir, "builds")); err != nil {
-		return err
+		return nil, err
 	}
 	path := s.buildPath(e)
 	if err := os.Mkdir(path, 0700); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.Mkdir(filepath.Join(path, "context"), 0700); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.Mkdir(filepath.Join(path, "tmp"), 0700); err != nil {
-		return err
+		return nil, err
 	}
-	return os.WriteFile(filepath.Join(path, "context", "Dockerfile"), []byte(plan.dockerfile), 0600)
+	if err := os.WriteFile(filepath.Join(path, "context", "Dockerfile"), []byte(plan.dockerfile), 0600); err != nil {
+		return nil, err
+	}
+	return s.prepareLogs(path, cancel)
 }
-func (s *Service) completeBuild(ctx context.Context, runtime BuildRuntime, e Exact, plan BuildPlan, permit *BackendPermit) {
+func (s *Service) completeBuild(ctx context.Context, runtime BuildRuntime, e Exact, plan BuildPlan, permit *BackendPermit, logs *buildLogs) {
 	defer s.buildWG.Done()
-	stdout, stderr := newStreamCapture(MaxStreamBytes), newStreamCapture(MaxStreamBytes)
 	result := func() (result BackendResult) {
 		defer func() {
 			if recover() != nil {
 				result = BackendResult{Err: ErrOutcomeUnknown}
 			}
 		}()
-		return runtime.Build(ctx, e, plan, s.buildPath(e), stdout, stderr)
+		return runtime.Build(ctx, e, plan, s.buildPath(e), logs.stdout, logs.stderr)
 	}()
+	// Build joins the subprocess and its drain loops. Sync/close the exact Data
+	// descriptors before publication, permit release, cleanup or singleton exit.
+	result.Err = errors.Join(result.Err, logs.finish())
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if b := s.builds[e]; b != nil {
@@ -209,11 +219,6 @@ func (s *Service) completeBuild(ctx context.Context, runtime BuildRuntime, e Exa
 	// No Data or journal writes after singleton ownership has been relinquished.
 	if !s.ready || s.entries[e.Workspace] != e {
 		return
-	}
-	for name, data := range map[string][]byte{"stdout": stdout.bytes(), "stderr": stderr.bytes()} {
-		if err := os.WriteFile(filepath.Join(s.buildPath(e), name), data, 0600); err != nil {
-			result.Err = errors.Join(result.Err, err)
-		}
 	}
 	r := s.records[e]
 	if r.Phase == Deleting {

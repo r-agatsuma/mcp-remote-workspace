@@ -91,6 +91,8 @@ type Service struct {
 	records        map[Exact]GenerationRecord
 	builds         map[Exact]*activeBuild
 	buildWG        sync.WaitGroup
+	// Private fault-injection seam; production always prepares ordinary Data logs.
+	prepareLogs func(string, context.CancelFunc) (*buildLogs, error)
 }
 
 // Open obtains the account-wide singleton before constructing or discovering
@@ -157,7 +159,7 @@ func open(ctx context.Context, cfg Config, factory func() Runtime, lockPath stri
 		return nil, err
 	}
 	s := &Service{runtime: factory(), image: cfg.Image, path: filepath.Join(cfg.StateDir, "journal.json"), lock: lock, save: writeLifecycleJournal,
-		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout, records: make(map[Exact]GenerationRecord), builds: make(map[Exact]*activeBuild)}
+		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout, records: make(map[Exact]GenerationRecord), builds: make(map[Exact]*activeBuild), prepareLogs: prepareBuildLogs}
 	if s.runtime == nil {
 		return nil, errors.New("runtime is required")
 	}

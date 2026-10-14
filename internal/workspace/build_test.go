@@ -116,7 +116,7 @@ func (f *fakeBuilder) CleanupBuild(_ context.Context, e Exact, _ string) error {
 	delete(f.images, e)
 	return nil
 }
-func openBuilder(t *testing.T, f *fakeBuilder, p *Policy) (*Service, Config, string) {
+func openBuilder(t *testing.T, f Runtime, p *Policy) (*Service, Config, string) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := testConfig(filepath.Join(dir, "state"))
