@@ -125,6 +125,16 @@ func TestBuildLogPreparationFailurePreventsSubmission(t *testing.T) {
 				if f.builds != 0 || f.creates != 0 || len(s.PendingBackend()) != 0 {
 					t.Fatal("failed log preparation submitted backend work")
 				}
+				if kind == "symlink" {
+					if err := s.Destroy(context.Background(), i); !errors.Is(err, ErrOutcomeUnknown) {
+						t.Fatal("ambiguous log symlink authorized cleanup", err)
+					}
+					assertState(t, s, i, Failed)
+					// Model trusted repair of the deliberately injected ambiguity.
+					if err := os.Remove(filepath.Join(s.buildPath(r.Exact), name)); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if err := s.Destroy(context.Background(), i); err != nil {
 					t.Fatal(err)
 				}

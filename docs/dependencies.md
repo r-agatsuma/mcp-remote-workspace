@@ -1,7 +1,8 @@
 # Dependency inventory
 
-The only direct non-standard-library module is
-**`github.com/modelcontextprotocol/go-sdk v1.8.0`**. `go.mod` pins selected versions
+The direct non-standard-library modules are
+**`github.com/modelcontextprotocol/go-sdk v1.8.0`** and **`golang.org/x/sys v0.41.0`**.
+`go.mod` pins selected versions
 and `go.sum` records downloaded module checksums. There are no replacements or
 additional convenience/framework dependencies.
 
@@ -37,9 +38,12 @@ additional convenience/framework dependencies.
 
 ## Transitive modules selected by this baseline
 
-These eight modules appear as `// indirect` requirements after `go mod tidy` and
-in `go list -deps ./cmd/mcp-workspaced`. They are brought in by the approved SDK;
-project source imports none of them directly. Inclusion in a package dependency
+These eight modules were brought in by the approved SDK. The existing pinned
+`golang.org/x/sys` is now also imported directly for Linux exact-generation Data
+cleanup: `openat2` constrains traversal and `fchmodat2(AT_EMPTY_PATH)` changes only
+verified directory descriptors. The standard library does not expose both of
+these controls. No module/version or transitive dependency was added by this use;
+the other seven remain `// indirect` requirements. Inclusion in a package dependency
 graph does not establish which code survives binary linking.
 
 | Exact module/version | SDK dependency purpose | Maintainer/provenance |
@@ -50,7 +54,7 @@ graph does not establish which code survives binary linking.
 | `github.com/yosida95/uritemplate/v3 v3.0.2` | MCP resource URI templates | yosida95, [upstream](https://github.com/yosida95/uritemplate) |
 | `golang.org/x/oauth2 v0.35.0` | SDK auth package used by MCP transports | Go project, [upstream](https://go.googlesource.com/oauth2) |
 | `golang.org/x/sync v0.20.0` | SDK multi-round-trip request concurrency | Go project, [upstream](https://go.googlesource.com/sync) |
-| `golang.org/x/sys v0.41.0` | Platform primitives used by Segmentio assembly support | Go project, [upstream](https://go.googlesource.com/sys) |
+| `golang.org/x/sys v0.41.0` | Platform primitives used by Segmentio assembly support; direct Linux cleanup syscalls | Go project, [upstream](https://go.googlesource.com/sys) |
 | `golang.org/x/time v0.15.0` | SDK logging rate limiting | Go project, [upstream](https://go.googlesource.com/time) |
 
 The complete `go list -m all` graph also includes the following modules, absent

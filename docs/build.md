@@ -181,6 +181,17 @@ owned external build containers, independently reads back storage/runtime absenc
 and removes only
 G's Data subtree before ABSENT. Image deletion uses immutable IDs and `--no-prune`;
 there is no global/wildcard prune. Other generations and unrelated Data remain.
+After backend absence and local worker/drain completion, Linux Data cleanup pins
+the private service-owned Data/builds/generation directories. Descriptor-relative
+`openat2` traversal rejects symlinks, path escapes and mount crossings, including
+bind mounts on the same filesystem. Only service-owned directories and ordinary
+single-link files are removed. Restrictive engine directories (including modes
+0100 and 0000) receive only missing owner read/write/search permissions through
+`fchmodat2(AT_EMPTY_PATH)` on the pinned descriptor; file modes and group/other
+permission bits are unchanged. Traversal uses batches of 64 entries and at most
+128 nested levels. Unsupported kernel operations, unexpected ownership/types,
+links or mounts fail closed. No path-based chmod fallback is used. The exact
+entry is independently checked for absence before generation intent is removed.
 Missing/inconsistent ownership, unidentified external engine containers or dangling images, retained
 objects, partial cleanup or uncertain completion keep intent/admission closed for
 that generation instead of guessing ownership. Such uncertainty requires trusted
@@ -196,7 +207,10 @@ cleanup ownership, shared admission and bounded logs/tools. Log tests exercise
 pre-submission ordinary files, preparation failure, output beyond capacity,
 allocation-free saturation, subprocess/drain completion fencing, write/sync
 failure, restart and late-writer isolation. These are local source
-and adapter-contract evidence. Real host Podman builds/image fetches and effective
+and adapter-contract evidence. Data cleanup tests exercise restrictive nested
+directories after cancellation, TTL, late completion and reopen, rejection of
+symlinks/path escapes/unexpected entries, mount boundaries and neighbor preservation.
+Real host Podman builds/image fetches and effective
 network/cgroup enforcement are the implementation-time verification responsibility
 of Issue #72 against the delivered exact revision.
 
@@ -207,6 +221,16 @@ version and is no longer used for attribution. Existing residue without the new
 saved namespace setting remains ambiguous and cannot be adopted. Real support,
 cancellation cleanup and effective RUN networking/resources still require #72
 verification against the revised exact source revision.
+
+The configured build PID ceiling remains unresolved on this canonical version.
+Buildah 1.33.5's [build CLI flags](https://github.com/containers/buildah/blob/v1.33.5/pkg/cli/common.go)
+provide no `--pids-limit`; its [RUN resource construction](https://github.com/containers/buildah/blob/v1.33.5/run_linux.go)
+does not copy `containers.conf`'s `pids_limit` into the OCI spec. Merely adding that
+configuration value would not enforce `Policy.PIDsMax`. Selecting a runtime with
+the required build resource interface, or approving a different enforcement
+mechanism, requires a Human decision. This revision does not change the canonical
+runtime or introduce a wrapper, cgroup manager or privileged helper. Effective
+RUN PID enforcement remains an open acceptance blocker, independent of Data cleanup.
 
 The propagation contract follows the versioned official sources:
 [Podman build options](https://github.com/containers/podman/blob/v4.9.3/cmd/podman/common/build.go),

@@ -357,19 +357,8 @@ func (s *Service) destroyCustom(ctx context.Context, e Exact) error {
 	if _, exists := objects[e]; exists {
 		return ErrOutcomeUnknown
 	}
-	path := s.buildPath(e)
-	if info, err := os.Lstat(path); err == nil {
-		if !info.IsDir() || info.Mode().Perm()&0077 != 0 || !ownedByService(info) {
-			return ErrOutcomeUnknown
-		}
-		if err := os.RemoveAll(path); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := s.removeBuildData(ctx, e); err != nil {
 		return err
-	}
-	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-		return ErrOutcomeUnknown
 	}
 	next := clone(s.entries)
 	delete(next, e.Workspace)
