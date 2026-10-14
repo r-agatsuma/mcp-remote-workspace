@@ -45,16 +45,17 @@ func (f *storageEngine) run(_ context.Context, args ...string) ([]byte, error) {
 }
 
 func (f *storageEngine) runBuild(ctx context.Context, _ string, _ string, _, _ io.Writer, args ...string) BackendResult {
-	module := strings.TrimPrefix(args[0], "--module=")
-	data, err := os.ReadFile(module)
-	if err != nil {
-		return BackendResult{DefinitelyCompleted, err}
+	marker := ""
+	for _, arg := range args {
+		if value, ok := strings.CutPrefix(arg, "--network="); ok {
+			marker = value
+		}
 	}
-	_, quoted, ok := strings.Cut(strings.TrimSpace(string(data)), "default_mounts_file = ")
-	marker, err := strconv.Unquote(quoted)
-	if !ok || err != nil {
+	if !strings.HasPrefix(marker, "pasta:--pid,") {
 		return BackendResult{DefinitelyCompleted, ErrNotReady}
 	}
+	// Persist the CLI namespace setting before RUN, as Buildah NewBuilder does.
+	// No PID file or final image need exist for attribution to survive.
 	f.mu.Lock()
 	f.markers[strings.Repeat("f", 64)] = marker
 	f.mu.Unlock()
@@ -80,7 +81,7 @@ func (c storageCommands) run(_ context.Context, args ...string) ([]byte, error) 
 	}
 	switch args[0] {
 	case "inspect":
-		return json.Marshal(map[string]string{"Type": "buildah 0.0.1", "ContainerID": id, "DefaultMountsFilePath": marker})
+		return json.Marshal(map[string]any{"Type": "buildah 0.0.1", "ContainerID": id, "DefaultMountsFilePath": "", "NamespaceOptions": []any{map[string]any{"Name": "network", "Host": false, "Path": marker}}})
 	case "rm":
 		if !f.retain {
 			delete(f.markers, id)
@@ -237,7 +238,7 @@ func TestExternalStorageRestartReconciliationAndOrphan(t *testing.T) {
 	}
 	// Same exact external marker without journal authority cannot be adopted.
 	engine.mu.Lock()
-	engine.markers[strings.Repeat("f", 64)] = filepath.Join(f.podman.candidateBuildPath(r.Exact), buildMountsFile)
+	engine.markers[strings.Repeat("f", 64)] = f.podman.buildNetwork(r.Exact)
 	engine.mu.Unlock()
 	if orphan, err := open(context.Background(), cfg, func() Runtime { return f }, lock); !errors.Is(err, ErrStaleGeneration) {
 		if orphan != nil {

@@ -4,6 +4,7 @@ package workspace
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -88,7 +89,7 @@ func TestPodmanBuildPinnedSourcesAndFixedOptions(t *testing.T) {
 		t.Fatal("temp state escaped exact Data path")
 	}
 	args := strings.Join(cli.args, " ")
-	for _, flag := range []string{"--file=-", "--pull=never", "--layers=false", "--rm=true", "--force-rm=true", "--jobs=1", "--network=private", "--http-proxy=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=4294967296", "--ulimit=nofile=1024:1024", "--tag=" + buildImageName(e)} {
+	for _, flag := range []string{"--file=-", "--pull=never", "--layers=false", "--rm=true", "--force-rm=true", "--jobs=1", "--isolation=rootless", "--network=" + p.buildNetwork(e), "--http-proxy=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=4294967296", "--ulimit=nofile=1024:1024", "--tag=" + buildImageName(e)} {
 		if !strings.Contains(args, flag) {
 			t.Fatalf("missing trusted option %s: %s", flag, args)
 		}
@@ -165,7 +166,7 @@ func TestPodmanKnownImagesIncludeHistoricalAliases(t *testing.T) {
 	}
 }
 func buildahInspectStep(t *testing.T, id, marker string) commandStep {
-	return commandStep{args: []string{"inspect", "--type=container", "--", id}, output: jsonText(t, map[string]any{"Type": "buildah 0.0.1", "ContainerID": id, "DefaultMountsFilePath": marker})}
+	return commandStep{args: []string{"inspect", "--type=container", "--", id}, output: jsonText(t, map[string]any{"Type": "buildah 0.0.1", "ContainerID": id, "DefaultMountsFilePath": "", "NamespaceOptions": []any{map[string]any{"Name": "network", "Host": false, "Path": marker}}})}
 }
 func externalInventorySteps(t *testing.T, objects ...Object) []commandStep {
 	return []commandStep{externalListStep(t, objects...), listStep(listJSON(t))}
@@ -193,7 +194,9 @@ func TestPodmanCleanupExactImagesContainersAndReadback(t *testing.T) {
 	steps = append(steps, externalInventorySteps(t, otherTemp)...)
 	p, _ := podmanStub(t, steps...)
 	root := t.TempDir()
-	marker := func(g Exact) string { return filepath.Join(root, "builds", objectName(g), buildMountsFile) }
+	marker := func(g Exact) string {
+		return buildNetworkPrefix + filepath.Join(root, "builds", objectName(g), buildPIDFile) + buildPastaOptions
+	}
 	storageStub(t, p, root, buildahInspectStep(t, temp.ID, marker(e)), buildahInspectStep(t, otherTemp.ID, marker(other)), commandStep{args: []string{"rm", "--", temp.ID}}, buildahInspectStep(t, otherTemp.ID, marker(other)))
 	if err := p.Initialize(context.Background()); err != nil {
 		t.Fatal(err)
@@ -218,12 +221,12 @@ func TestPodmanCleanupUnidentifiedResidueFailsClosed(t *testing.T) {
 				steps = append(steps, imageListStep(t, id), inspect, commandStep{args: []string{"image", "rm", "--no-prune", "--", id}}, imageListStep(t, id), inspect)
 			} else {
 				steps = append(steps, externalInventorySteps(t, temp)...)
-				marker := filepath.Join(path, buildMountsFile)
+				marker := buildNetworkPrefix + filepath.Join(path, buildPIDFile) + buildPastaOptions
 				if mode == "unattributed" {
 					marker = ""
 				}
 				if mode == "wrong-root" {
-					marker = filepath.Join(root, "other", objectName(e), buildMountsFile)
+					marker = buildNetworkPrefix + filepath.Join(root, "other", objectName(e), buildPIDFile) + buildPastaOptions
 				}
 				inspect := buildahInspectStep(t, temp.ID, marker)
 				if mode == "wrong-id" {
@@ -255,6 +258,84 @@ func TestPodmanCleanupUnidentifiedResidueFailsClosed(t *testing.T) {
 				t.Fatalf("uncertain residue removed/ignored: %v", err)
 			}
 		})
+	}
+}
+
+func TestExternalStorageRequiresExactSavedNetwork(t *testing.T) {
+	e := Exact{identity(t, "s", "attribution").Workspace(), Generation(strings.Repeat("d", 64))}
+	for _, mode := range []string{"missing", "legacy-mounts", "host", "missing-host", "duplicate", "wrong-namespace", "changed-options", "wrong-file", "traversal", "labels-only"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			p := &Podman{buildConfig: PodmanBuildConfig{DataDir: root}}
+			temp := Object{ID: strings.Repeat("f", 64), Name: objectName(e), Labels: objectLabels(e, buildImageName(e))}
+			network := map[string]any{"Name": "network", "Host": false, "Path": p.buildNetwork(e)}
+			namespaces := []any{network}
+			switch mode {
+			case "missing", "legacy-mounts", "labels-only":
+				namespaces = nil
+			case "host":
+				network["Host"] = true
+			case "missing-host":
+				delete(network, "Host")
+			case "duplicate":
+				namespaces = append(namespaces, network)
+			case "wrong-namespace":
+				network["Name"] = "uts"
+			case "changed-options":
+				network["Path"] = p.buildNetwork(e) + ",--map-gw"
+			case "wrong-file":
+				network["Path"] = strings.Replace(p.buildNetwork(e), "/pasta.pid,", "/other.pid,", 1)
+			case "traversal":
+				network["Path"] = strings.Replace(p.buildNetwork(e), "/pasta.pid,", "/../"+objectName(e)+"/pasta.pid,", 1)
+			}
+			v := map[string]any{"Type": "buildah 0.0.1", "ContainerID": temp.ID, "NamespaceOptions": namespaces}
+			if mode == "legacy-mounts" {
+				v["DefaultMountsFilePath"] = filepath.Join(p.candidateBuildPath(e), "default-mounts.conf")
+			}
+			if mode == "labels-only" {
+				v["OCIv1"] = map[string]any{"config": map[string]any{"Labels": temp.Labels}}
+			}
+			inspect := buildahInspectStep(t, temp.ID, "")
+			inspect.output = jsonText(t, v)
+			steps := append([]commandStep{infoStep()}, externalInventorySteps(t, temp)...)
+			p, _ = podmanStub(t, steps...)
+			storageStub(t, p, root, inspect) // No deletion is authorized.
+			if err := p.Initialize(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.CleanupBuild(context.Background(), e, p.candidateBuildPath(e)); !errors.Is(err, ErrOutcomeUnknown) {
+				t.Fatalf("ambiguous attribution accepted: %v", err)
+			}
+		})
+	}
+}
+
+// This fixture models the canonical Buildah inspect shape, including an empty
+// DefaultMountsFilePath and unrelated default namespaces. Attribution exists
+// before pasta writes a PID file or a Dockerfile commits any image.
+func TestExternalStorageAttributionBeforeRun(t *testing.T) {
+	e := Exact{identity(t, "s", "before-run").Workspace(), Generation(strings.Repeat("d", 64))}
+	temp := Object{ID: strings.Repeat("f", 64), Name: "unlabelled-working-container"}
+	p, _ := podmanStub(t, append([]commandStep{infoStep()}, externalInventorySteps(t, temp)...)...)
+	root := t.TempDir()
+	p.buildConfig.DataDir = root
+	inspect := buildahInspectStep(t, temp.ID, p.buildNetwork(e))
+	var v map[string]any
+	if err := json.Unmarshal([]byte(inspect.output), &v); err != nil {
+		t.Fatal(err)
+	}
+	v["NamespaceOptions"] = append(v["NamespaceOptions"].([]any), map[string]any{"Name": "uts", "Host": false, "Path": ""})
+	inspect.output = jsonText(t, v)
+	storageStub(t, p, root, inspect)
+	if err := p.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := p.externalBuildContainers(context.Background())
+	if err != nil || !reflect.DeepEqual(objects, []externalBuildContainer{{temp.ID, e}}) {
+		t.Fatalf("saved namespace attribution=%v %v", objects, err)
+	}
+	if _, err := os.Stat(filepath.Join(p.candidateBuildPath(e), buildPIDFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("fixture incorrectly depended on a PID file")
 	}
 }
 

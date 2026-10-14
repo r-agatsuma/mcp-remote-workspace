@@ -59,8 +59,12 @@ exception. Registry fetches and rootless build networking inherit the existing
 root-managed host Netfilter OUTPUT policy selected by the numeric `mcp-runner`
 UID, at actual destinations including DNS-resolved and redirected connections.
 There is no DNS pre-resolution boundary, redirect parser, proxy, firewall helper
-or extra privilege in this implementation. The adapter selects private rootless
-networking, disables inherited proxy settings and drops capabilities.
+or extra privilege in this implementation. The adapter selects `--isolation=rootless`
+and explicit `--network=pasta:...` for an independent rootless network namespace,
+disables inherited proxy settings and drops capabilities. It explicitly disables
+TCP/UDP forwarding in both directions (`-t/-u/-T/-U none`) and gateway-to-host
+mapping (`--no-map-gw`). The service module clears inherited `pasta_options`,
+including array-append settings, before these fixed arguments are applied.
 
 ## Trusted build defaults
 
@@ -84,6 +88,8 @@ Embedded hosts configure `NewPodmanWithBuildConfig` with the service's exact
 `-buildah` selects an absolute local Buildah executable (default `/usr/bin/buildah`)
 under the same non-root account, environment and storage as Podman. This is a
 storage inspection/removal tool, with no remote transport or additional privilege.
+DataDir must not contain commas, NUL, CR or LF: commas delimit pasta options and
+cannot safely represent part of the candidate metadata path in that grammar.
 
 ## Ownership, completion and cleanup
 
@@ -92,11 +98,14 @@ and durably records BUILDING before creating Data state or submitting build work
 The Data path is `builds/mcpws-v1-<W>-<G>` beneath operator DataDir. Its `context`
 directory contains only the compiled `Dockerfile`; bounded stdout/stderr (64 KiB
 head/tail per stream) and operational temporary state are outside that context.
-Outside `context`, the adapter creates a private, empty `default-mounts.conf`
-and a small `build-container.conf` module that selects it using `podman --module`.
-The empty file supplies no host mounts. Its exact W/G path is saved as Buildah's
-`DefaultMountsFilePath` when each working container is initialized, before RUN;
-image labels are not relied on for interrupted working-container ownership.
+Outside `context`, the adapter creates a private `build-container.conf` module
+that resets pasta options using `podman --module`. The fixed network argument
+contains `--pid,<DataDir>/builds/mcpws-v1-<W>-<G>/pasta.pid`. Buildah saves this
+argument in its network `NamespaceOptions` when initializing each working
+container, before RUN. This also applies to external COPY source containers.
+Attribution uses that saved setting, even if pasta has not started and no PID
+file or final image exists. The PID value is never process/deletion authority.
+Caller Dockerfile instructions cannot supply or change this namespace setting.
 No arbitrary local files can become caller COPY inputs. Ordinary context COPY
 instructions have only Dockerfile available, and typically fail when other files
 are requested. Same-file stage COPY remains supported.
@@ -131,8 +140,9 @@ exit alone does not prove that Buildah work stopped.
 
 Cleanup separates ordinary Podman objects from external storage objects using
 bounded inventories. External objects use `buildah inspect --type=container` and
-full immutable IDs; only a saved mounts-file path beneath the configured exact
-Data/W/G path establishes attribution. Names, base-image IDs, inventory deltas and
+full immutable IDs; only one saved non-host network namespace with the complete
+expected pasta argument and exact Data/W/G PID-file path establishes attribution.
+Missing, duplicated or altered settings fail closed. Names, base-image IDs, inventory deltas and
 image labels alone do not grant external deletion authority. `buildah rm -- ID`
 removes only attributed G objects. Startup includes these objects in generation
 reconciliation even when no custom image was committed.
@@ -158,19 +168,29 @@ and adapter-contract evidence. Real host Podman builds/image fetches and effecti
 network/cgroup enforcement are the implementation-time verification responsibility
 of Issue #72 against the delivered exact revision.
 
-The runtime must support `podman --module`, propagation of the configured
-`default_mounts_file` into Buildah builder metadata, and the Buildah inspect
-`Type`/`ContainerID`/`DefaultMountsFilePath` shape. Missing or inconsistent metadata
-fails closed; existing residue created without this attribution cannot be guessed
-into ownership. Real support and cancellation cleanup must be verified in #72
-against the revised exact source revision, together with public default DNS.
+The adapter targets Podman 4.9.3 / Buildah 1.33.5's explicit pasta path and inspect
+`Type`/`ContainerID`/`NamespaceOptions` shape. The former `default_mounts_file`
+module setting is not TOML-configurable in the canonical containers/common
+version and is no longer used for attribution. Existing residue without the new
+saved namespace setting remains ambiguous and cannot be adopted. Real support,+cancellation cleanup and effective RUN networking/resources still require #72
+verification against the revised exact source revision.
 
-The module and storage inspection contracts follow the official
-[containers.conf documentation](https://github.com/containers/common/blob/main/docs/containers.conf.5.md),
-[Podman build implementation](https://github.com/containers/podman/blob/main/cmd/podman/common/build.go),
-[Buildah builder metadata](https://github.com/containers/buildah/blob/main/buildah.go),
-[Buildah inspect documentation](https://github.com/containers/buildah/blob/main/docs/buildah-inspect.1.md)
-and [Buildah removal documentation](https://github.com/containers/buildah/blob/main/docs/buildah-rm.1.md).
+The propagation contract follows the versioned official sources:
+[Podman build options](https://github.com/containers/podman/blob/v4.9.3/cmd/podman/common/build.go),
+[Buildah stage initialization](https://github.com/containers/buildah/blob/v1.33.5/imagebuildah/stage_executor.go),
+[builder state persistence](https://github.com/containers/buildah/blob/v1.33.5/new.go),
+[Buildah inspect projection](https://github.com/containers/buildah/blob/v1.33.5/buildah.go),
+[pasta setup](https://github.com/containers/common/blob/v0.57.4/libnetwork/pasta/pasta.go),
+[configuration fields](https://github.com/containers/common/blob/v0.57.4/pkg/config/config.go)
+and [configuration array overrides](https://github.com/containers/common/blob/v0.57.4/internal/attributedstring/slice.go).
+
+The primary build-log sink finding remains unresolved: output is currently
+captured in memory and the bounded retained files are written after Build returns.
+Pre-opened ordinary Data file descriptors plus a strict growth bound need an
+agreed enforcement mechanism. A process-wide file-size limit also constrains
+engine/build file writes; a monitoring cutoff permits transient overshoot and
+cannot bound writes by uncertain surviving workers. Neither behavior has been
+introduced as an implicit change to the build contract.
 
 The CLI options and image inspection shape follow the official
 [Podman build documentation](https://docs.podman.io/en/latest/markdown/podman-build.1.html)

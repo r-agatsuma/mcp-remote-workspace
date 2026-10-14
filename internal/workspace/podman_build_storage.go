@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -33,10 +32,25 @@ func (c localBuildahCLI) run(ctx context.Context, args ...string) ([]byte, error
 	return stdout.Bytes(), nil
 }
 
-const buildMountsFile = "default-mounts.conf"
+const (
+	buildPIDFile       = "pasta.pid"
+	buildNetworkPrefix = "pasta:--pid,"
+	buildPastaOptions  = ",--no-map-gw,-t,none,-u,none,-T,none,-U,none"
+	buildNetworkModule = "[network]\npasta_options = [{append = false}]\n"
+)
 
 func (p *Podman) candidateBuildPath(e Exact) string {
 	return filepath.Join(p.buildConfig.DataDir, "builds", objectName(e))
+}
+
+// Buildah saves NamespaceOptions in NewBuilder before executing any RUN, and
+// exposes them through buildah inspect. The exact service-owned PID-file path
+// is operational metadata for pasta as well as a candidate attribution token.
+// Never use the PID's value, container name, image labels or inventory deltas
+// as deletion authority. All stages (including external COPY) inherit this CLI
+// setting; Dockerfile RUN network overrides are rejected by the compiler.
+func (p *Podman) buildNetwork(e Exact) string {
+	return buildNetworkPrefix + filepath.Join(p.candidateBuildPath(e), buildPIDFile) + buildPastaOptions
 }
 
 func (p *Podman) prepareBuildAttribution(e Exact, path string) (string, error) {
@@ -47,22 +61,21 @@ func (p *Podman) prepareBuildAttribution(e Exact, path string) (string, error) {
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 || !ownedByService(info) {
 		return "", ErrNotReady
 	}
-	mounts := filepath.Join(path, buildMountsFile)
 	module := filepath.Join(path, "build-container.conf")
+	if _, err := os.Lstat(filepath.Join(path, buildPIDFile)); !errors.Is(err, os.ErrNotExist) {
+		return "", ErrNotReady
+	}
+	// Reset inherited pasta options so deployment defaults cannot enable host
+	// mapping or port forwarding, even if an earlier file enabled array append.
+	// The fixed CLI supplies all network options.
 	// Exclusive creation refuses stale or substituted metadata, including symlinks.
-	for _, file := range []struct{ path, text string }{
-		{mounts, ""},
-		{module, "[containers]\ndefault_mounts_file = " + strconv.Quote(mounts) + "\n"},
-	} {
-		f, err := os.OpenFile(file.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			return "", err
-		}
-		_, writeErr := f.WriteString(file.text)
-		err = errors.Join(writeErr, f.Sync(), f.Close())
-		if err != nil {
-			return "", err
-		}
+	f, err := os.OpenFile(module, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", err
+	}
+	_, writeErr := f.WriteString(buildNetworkModule)
+	if err := errors.Join(writeErr, f.Sync(), f.Close()); err != nil {
+		return "", err
 	}
 	return module, nil
 }
@@ -125,16 +138,36 @@ func (p *Podman) externalBuildContainers(ctx context.Context) ([]externalBuildCo
 		if err != nil {
 			return nil, errors.Join(ErrOutcomeUnknown, err)
 		}
-		var v struct{ Type, ContainerID, DefaultMountsFilePath string }
+		var v struct {
+			Type, ContainerID string
+			NamespaceOptions  []struct {
+				Name, Path string
+				Host       *bool
+			}
+		}
 		if json.Unmarshal(data, &v) != nil || v.Type != "buildah 0.0.1" || v.ContainerID != id {
 			return nil, ErrOutcomeUnknown
 		}
-		marker := v.DefaultMountsFilePath
+		network := ""
+		for _, option := range v.NamespaceOptions {
+			if option.Name != "network" {
+				continue
+			}
+			if network != "" || option.Host == nil || *option.Host || option.Path == "" {
+				return nil, ErrOutcomeUnknown
+			}
+			network = option.Path
+		}
+		marker, ok := strings.CutPrefix(network, buildNetworkPrefix)
+		if !ok {
+			return nil, ErrOutcomeUnknown
+		}
+		marker, _, _ = strings.Cut(marker, ",")
 		name := filepath.Base(filepath.Dir(marker))
 		suffix, ok := strings.CutPrefix(name, namePrefix)
 		w, g, split := strings.Cut(suffix, "-")
 		e := Exact{WorkspaceKey(w), Generation(g)}
-		if !ok || !split || e.validate() != nil || p.buildConfig.DataDir == "" || marker != filepath.Join(p.candidateBuildPath(e), buildMountsFile) {
+		if !ok || !split || e.validate() != nil || p.buildConfig.DataDir == "" || network != p.buildNetwork(e) {
 			return nil, ErrOutcomeUnknown
 		}
 		result = append(result, externalBuildContainer{id, e})

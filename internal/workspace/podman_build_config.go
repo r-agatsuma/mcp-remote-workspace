@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"strings"
 )
 
 // PodmanBuildConfig is host-owned configuration, never Dockerfile/MCP input.
@@ -17,6 +18,11 @@ type PodmanBuildConfig struct {
 func (c PodmanBuildConfig) Validate() error {
 	if c.BuildahPath != "" && !filepath.IsAbs(c.BuildahPath) || c.DataDir != "" && !filepath.IsAbs(c.DataDir) {
 		return errors.New("absolute Buildah/Data paths required")
+	}
+	// Podman separates pasta arguments with commas; no caller or deployment
+	// path may create an additional network option through that grammar.
+	if strings.ContainsAny(c.DataDir, ",\x00\r\n") {
+		return errors.New("Data path cannot contain pasta option delimiters or control characters")
 	}
 	if len(c.DNS) > 8 {
 		return errors.New("too many build default resolvers")

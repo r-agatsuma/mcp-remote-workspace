@@ -290,14 +290,13 @@ func (p *Podman) Build(ctx context.Context, e Exact, plan BuildPlan, path string
 	if err != nil || len(entries) != 1 || entries[0].Name() != "Dockerfile" || entries[0].Type()&os.ModeSymlink != 0 || entries[0].IsDir() {
 		return fail(ErrDockerfilePolicy)
 	}
-	// This trusted, empty mounts file is persisted in each Buildah builder at
-	// allocation, before RUN. Unlike image labels it survives an interrupted RUN.
-	// The module changes only that setting and supplies no host mount.
+	// Persist exact attribution in Buildah's namespace options at allocation,
+	// before RUN. The module clears inherited pasta mapping/forwarding options.
 	module, err := p.prepareBuildAttribution(e, path)
 	if err != nil {
 		return fail(err)
 	}
-	args := []string{"--module=" + module, "build", "--file=-", "--pull=never", "--layers=false", "--no-cache", "--rm=true", "--force-rm=true", "--jobs=1", "--isolation=oci", "--network=private", "--http-proxy=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tag=" + buildImageName(e)}
+	args := []string{"--module=" + module, "build", "--file=-", "--pull=never", "--layers=false", "--no-cache", "--rm=true", "--force-rm=true", "--jobs=1", "--isolation=rootless", "--network=" + p.buildNetwork(e), "--http-proxy=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tag=" + buildImageName(e)}
 	for _, resolver := range p.buildConfig.DNS {
 		ip, _ := netip.ParseAddr(resolver)
 		args = append(args, "--dns="+ip.Unmap().String())
