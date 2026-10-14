@@ -72,7 +72,7 @@ type CreateResult struct {
 // BuildGenerations is a synchronous, read-only ownership inventory used to reject
 // orphan image intent on startup. Neither probe leaves backend work on return.
 // CleanupBuild must remove and independently confirm ONLY exact-G image,
-// intermediate container/image and temporary backend residue. It may fail closed.
+// intermediate container/image, bounded build cgroup and temporary backend residue. It may fail closed.
 // Caller Dockerfile never supplies any of these host paths or runtime options.
 type BuildRuntime interface {
 	KnownBuildImages(context.Context) ([]string, error)

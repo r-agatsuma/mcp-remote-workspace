@@ -116,6 +116,7 @@ func storageLifecycleFixture(t *testing.T) (*storageLifecycleBuilder, *storageEn
 	cfg.DataDir = filepath.Join(root, "data")
 	f := &storageEngine{markers: map[string]string{}, started: make(chan struct{}), canceled: make(chan struct{}), finish: make(chan BackendResult, 1)}
 	p := &Podman{runner: f, buildah: storageCommands{f}, image: testImage, buildConfig: PodmanBuildConfig{DataDir: cfg.DataDir}}
+	p.buildCgroups, _ = cgroupFixture(cfg.DataDir)
 	return &storageLifecycleBuilder{newBuilder(), p}, f, cfg, filepath.Join(root, "lock", "daemon.lock")
 }
 

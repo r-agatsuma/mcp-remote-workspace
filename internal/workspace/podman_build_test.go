@@ -44,7 +44,11 @@ func externalListStep(t *testing.T, objects ...Object) commandStep {
 }
 func buildFixture(t *testing.T, e Exact, plan BuildPlan) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "builds", objectName(e))
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "builds", objectName(e))
 	if err := os.MkdirAll(filepath.Join(path, "context"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +63,7 @@ func buildFixture(t *testing.T, e Exact, plan BuildPlan) string {
 func configureBuildFixture(t *testing.T, p *Podman, e Exact, plan BuildPlan) string {
 	path := buildFixture(t, e, plan)
 	p.buildConfig.DataDir = filepath.Dir(filepath.Dir(path))
+	p.buildCgroups, _ = cgroupFixture(p.buildConfig.DataDir)
 	p.buildah = &stubCLI{t: t}
 	return path
 }

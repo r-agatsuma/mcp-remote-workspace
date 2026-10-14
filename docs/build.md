@@ -222,15 +222,54 @@ saved namespace setting remains ambiguous and cannot be adopted. Real support,
 cancellation cleanup and effective RUN networking/resources still require #72
 verification against the revised exact source revision.
 
-The configured build PID ceiling remains unresolved on this canonical version.
-Buildah 1.33.5's [build CLI flags](https://github.com/containers/buildah/blob/v1.33.5/pkg/cli/common.go)
-provide no `--pids-limit`; its [RUN resource construction](https://github.com/containers/buildah/blob/v1.33.5/run_linux.go)
-does not copy `containers.conf`'s `pids_limit` into the OCI spec. Merely adding that
-configuration value would not enforce `Policy.PIDsMax`. Selecting a runtime with
-the required build resource interface, or approving a different enforcement
-mechanism, requires a Human decision. This revision does not change the canonical
-runtime or introduce a wrapper, cgroup manager or privileged helper. Effective
-RUN PID enforcement remains an open acceptance blocker, independent of Data cleanup.
+The build PID parent implements the accepted #83 mechanism using the existing
+non-root systemd user manager. Before `podman build`, the adapter writes and syncs
+an exclusive, bounded `build-cgroup.json` record in exact G's Data directory, then
+calls `StartTransientUnit` through `/usr/bin/busctl --user`. The flat unit name is
+`mcpwsbuild<W><G>.slice`; its description carries W/G and a fresh service token.
+`TasksMax` receives exactly `Policy.PIDsMax` (512 in the reference policy), never
+`MigrationTasksMax` (513). `/usr/bin/systemctl --user` supplies bounded inventory,
+property inspection and exact stop operations. No unit file or deployment service
+is installed, and no additional Go dependency is introduced.
+
+The adapter requires the standard user-manager cgroup-v2 hierarchy beneath
+`/user.slice/user-<uid>.slice/user@<uid>.service/`. It checks the transient unit,
+exact identity, configured limit and cgroup path, then independently reads the
+kernel's `pids.max`, `pids.current` and recursive `cgroup.events` through pinned,
+symlink/mount-rejecting descriptors. Both observations must agree before execution.
+An unavailable manager/controller, ambiguous identity or failed setup prevents
+submission; an uncertain manager mutation retains backend ownership. A start-job
+observation wait is bounded to five seconds and never resubmits the operation.
+
+Podman receives explicit `--cgroup-manager=systemd` and
+`--cgroup-parent=mcpwsbuild<W><G>.slice:buildah:<W><G>`. This is the systemd OCI
+slice/scope format passed by Buildah's
+[resource construction](https://github.com/containers/buildah/blob/v1.33.5/run_linux.go)
+and [runtime invocation](https://github.com/containers/buildah/blob/v1.33.5/run_common.go).
+Names, scope suffixes and limits are entirely service-owned. Product logic never
+moves the daemon, Podman CLI, recovery or unrelated processes into the build
+parent; a daemon already inside that parent is rejected. A Buildah leaf may be
+unlimited, but its exact ancestor must carry the configured limit. Effective RUN
+ancestry and saturation behavior still require fresh #72 verification.
+
+Successful subprocess/drain completion is followed by another identity/limit and
+zero-task check before publication. The parent remains exact-generation cleanup
+state, including for PRESENT and FAILED. Cancellation, TTL and restart retain it
+while the existing backend/worker fence is unresolved. Startup inventories both
+manager slices and kernel directories: orphan or inconsistent ownership fails
+closed, and existing slice state never authorizes build replay or publication.
+After terminal backend handling and independent engine-residue absence, cleanup
+rechecks zero recursive tasks, stops only the exact matching transient slice and
+independently confirms both unit and cgroup absence before removing Data and
+asserting ABSENT. It never stops a populated slice as a substitute for recovery.
+An ambiguous or retained slice continues to fence absence.
+
+Local fake-manager and cgroup-file tests cover reference/custom limit propagation,
+caller non-authority, setup failure, lost creation replies, surviving tasks,
+identity/limit mismatches, stale/orphan state, exact release, cancellation, failed
+builds, TTL, restart and late completion. These tests do not mutate a real user
+manager or prove effective real-runtime PID containment. Transient-unit semantics
+follow the [systemd manager interface](https://www.freedesktop.org/software/systemd/man/org.freedesktop.systemd1.html).
 
 The propagation contract follows the versioned official sources:
 [Podman build options](https://github.com/containers/podman/blob/v4.9.3/cmd/podman/common/build.go),

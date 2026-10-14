@@ -193,6 +193,19 @@ func (p *Podman) BuildGenerations(ctx context.Context) ([]Exact, error) {
 			generations = append(generations, v.Exact)
 		}
 	}
+	if p.buildCgroups == nil {
+		return nil, ErrNotReady
+	}
+	groups, err := p.buildCgroups.Generations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range groups {
+		if !seen[e] {
+			seen[e] = true
+			generations = append(generations, e)
+		}
+	}
 	return generations, nil
 }
 
@@ -202,7 +215,7 @@ func (p *Podman) BuildGenerations(ctx context.Context) ([]Exact, error) {
 // privilege is introduced. Effective enforcement is real-host #72 evidence.
 func (p *Podman) Build(ctx context.Context, e Exact, plan BuildPlan, path string, stdout, stderr io.Writer) BackendResult {
 	fail := func(err error) BackendResult { return BackendResult{DefinitelyCompleted, err} }
-	if !p.initialized || e.validate() != nil || p.buildConfig.DataDir == "" || path != p.candidateBuildPath(e) || p.buildah == nil {
+	if !p.initialized || e.validate() != nil || p.buildConfig.DataDir == "" || path != p.candidateBuildPath(e) || p.buildah == nil || p.buildCgroups == nil {
 		return fail(ErrNotReady)
 	}
 	if err := p.buildConfig.Validate(); err != nil {
@@ -296,12 +309,19 @@ func (p *Podman) Build(ctx context.Context, e Exact, plan BuildPlan, path string
 	if err != nil {
 		return fail(err)
 	}
-	args := []string{"--module=" + module, "build", "--file=-", "--pull=never", "--layers=false", "--no-cache", "--rm=true", "--force-rm=true", "--jobs=1", "--isolation=rootless", "--network=" + p.buildNetwork(e), "--http-proxy=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tag=" + buildImageName(e)}
+	policy := p.resourcePolicy()
+	parent, err := p.buildCgroups.Prepare(ctx, e, policy.PIDsMax)
+	if err != nil {
+		return fail(err)
+	}
+	if parent != buildCgroupParent(e) {
+		return fail(ErrOutcomeUnknown)
+	}
+	args := []string{"--module=" + module, "--cgroup-manager=systemd", "build", "--cgroup-parent=" + parent, "--file=-", "--pull=never", "--layers=false", "--no-cache", "--rm=true", "--force-rm=true", "--jobs=1", "--isolation=rootless", "--network=" + p.buildNetwork(e), "--http-proxy=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tag=" + buildImageName(e)}
 	for _, resolver := range p.buildConfig.DNS {
 		ip, _ := netip.ParseAddr(resolver)
 		args = append(args, "--dns="+ip.Unmap().String())
 	}
-	policy := p.resourcePolicy()
 	args = append(args, "--memory="+strconv.FormatInt(policy.MemoryBytes, 10), "--memory-swap="+strconv.FormatInt(policy.MemoryBytes+policy.SwapBytes, 10), "--cpu-quota="+strconv.FormatInt(policy.CPUQuota, 10), "--ulimit=nofile="+strconv.FormatUint(policy.NoFile, 10)+":"+strconv.FormatUint(policy.NoFile, 10))
 	labels := objectLabels(e, buildImageName(e))
 	keys := []string{}
@@ -316,6 +336,11 @@ func (p *Podman) Build(ctx context.Context, e Exact, plan BuildPlan, path string
 	result := runner.runBuild(ctx, dockerfile, filepath.Join(path, "tmp"), stdout, stderr, args...)
 	if result.Err != nil || result.Completion != DefinitelyCompleted {
 		return result
+	}
+	// Successful CLI/drain completion alone cannot hide surviving RUN tasks or
+	// replacement of the bounded parent. Keep ownership until exact cleanup.
+	if err := p.buildCgroups.Check(ctx, e); err != nil {
+		return fail(errors.Join(ErrOutcomeUnknown, err))
 	}
 	v, err := p.inspectImage(ctx, buildImageName(e))
 	if err != nil {
@@ -442,5 +467,8 @@ func (p *Podman) CleanupBuild(ctx context.Context, e Exact, path string) (err er
 			return ErrOutcomeUnknown
 		}
 	}
-	return nil
+	if p.buildCgroups == nil {
+		return ErrNotReady
+	}
+	return p.buildCgroups.Release(ctx, e)
 }

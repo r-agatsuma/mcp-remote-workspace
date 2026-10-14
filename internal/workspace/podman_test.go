@@ -44,7 +44,8 @@ func podmanStub(t *testing.T, steps ...commandStep) (*Podman, *stubCLI) {
 			t.Errorf("executed %d of %d expected commands", stub.calls, len(steps))
 		}
 	})
-	return &Podman{runner: stub, image: testImage}, stub
+	groups, _ := cgroupFixture(t.TempDir())
+	return &Podman{runner: stub, image: testImage, buildCgroups: groups}, stub
 }
 func jsonText(t *testing.T, value any) string {
 	t.Helper()

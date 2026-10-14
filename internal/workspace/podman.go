@@ -51,12 +51,13 @@ func (c localCLI) run(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 type Podman struct {
-	runner      commandRunner
-	buildah     commandRunner
-	buildConfig PodmanBuildConfig
-	image       string
-	initialized bool
-	policy      *Policy
+	runner       commandRunner
+	buildah      commandRunner
+	buildConfig  PodmanBuildConfig
+	buildCgroups buildCgroupManager
+	image        string
+	initialized  bool
+	policy       *Policy
 	// Host-owned read-only proc/cgroup roots. Nil selects verified Linux mounts.
 	processRoots func() (*os.Root, *os.Root, error)
 }
@@ -76,7 +77,7 @@ func NewPodmanWithBuildConfig(path, image string, policy Policy, cfg PodmanBuild
 		cfg.BuildahPath = "/usr/bin/buildah"
 	}
 	cfg.DNS = append([]string(nil), cfg.DNS...)
-	return &Podman{runner: localCLI{path}, buildah: localBuildahCLI{cfg.BuildahPath}, image: image, policy: &policy, buildConfig: cfg}
+	return &Podman{runner: localCLI{path}, buildah: localBuildahCLI{cfg.BuildahPath}, image: image, policy: &policy, buildConfig: cfg, buildCgroups: newBuildCgroups(cfg.DataDir)}
 }
 
 func (p *Podman) resourcePolicy() Policy {
