@@ -9,8 +9,9 @@ The host-supplied admission callback must attest identity and bind the exact
 generation; caller arguments and unverified wire `_meta` cannot supply authority.
 For create/destroy the callback attests identity and may return a zero Exact;
 the lifecycle service selects the exact current candidate itself.
-Registration opens no listener. The command's smoke server remains tool-free,
-and the daemon still supplies no product ingress.
+Registration itself opens no listener. The command's smoke server remains
+tool-free, while the daemon supplies the production loopback MCP ingress described
+below and in [production ingress](ingress.md).
 
 ## Requests and results
 
@@ -137,9 +138,10 @@ output and encoding errors, strict public request decoding, file UTF-8/size/path
 and create/truncate/symlink behavior, partial writes, no replay and persisted
 unknown accounting. Procfs/cgroup fixtures and fault injection also exercise the
 ordinary production `*Podman` probe and all three tool paths, including inherited
-limits, subtree membership, PID/cgroup reuse and fail-closed behavior. Fixture
-helper/probe execution is not OCI validation. Real Podman
-verification of the delivered exact revision remains external Issue #71 scope.
+limits, subtree membership, PID/cgroup reuse and fail-closed behavior. Fixture helper/probe execution is not OCI validation. Composed dirty-OCI
+verification of the delivered exact revision is owned by Issue #95 under the #90
+execution graph; clean reconstruction and real ChatGPT/Secure MCP Tunnel E2E are
+owned by Issue #96.
 
 ## Production admission
 
