@@ -79,6 +79,7 @@ func (p *Podman) buildArgs(e Exact, directory, parent string) []string {
 		"--pull=never", "--layers=false", "--no-cache", "--force-rm", "--jobs=1",
 		"--http-proxy=false", "--no-hosts", "--dns-search=.",
 		"--cap-drop=ALL", "--security-opt=no-new-privileges", "--hooks-dir=" + filepath.Join(directory, "hooks"),
+		"--default-mounts-file=" + filepath.Join(directory, "mounts.conf"),
 		"--memory=" + strconv.FormatInt(policy.MemoryBytes, 10),
 		"--memory-swap=" + strconv.FormatInt(policy.MemoryBytes+policy.SwapBytes, 10),
 		"--cpu-quota=" + strconv.FormatInt(policy.CPUQuota, 10),
@@ -128,6 +129,10 @@ func (p *Podman) Build(ctx context.Context, e Exact, text, dataDir string) (imag
 	}
 	// No host credentials are passed to image acquisition or untrusted RUN.
 	if err := os.WriteFile(filepath.Join(directory, "auth.json"), []byte(`{"auths":{}}`), 0600); err != nil {
+		return "", CompletedBackendError(err)
+	}
+	// An explicit empty policy replaces ambient user/system mounts.conf discovery.
+	if err := os.WriteFile(filepath.Join(directory, "mounts.conf"), nil, 0600); err != nil {
 		return "", CompletedBackendError(err)
 	}
 	f, err := os.OpenFile(filepath.Join(directory, "diagnostics"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)

@@ -54,6 +54,7 @@ func TestBuildCommandsPreserveExactParentResourcesAndNetwork(t *testing.T) {
 	for _, required := range []string{"--network=" + buildNetwork(e), "--cgroup-parent=" + parent,
 		"--dns=1.1.1.1", "--dns=8.8.8.8", "--memory=4294967296", "--memory-swap=4294967296",
 		"--ulimit=nofile=1024:1024", "--pull=never", "--http-proxy=false", "--hooks-dir=/data/exact/hooks",
+		"--default-mounts-file=/data/exact/mounts.conf",
 		"--label=" + generationLabel + "=" + string(e.Generation), "--layer-label=" + generationLabel + "=" + string(e.Generation)} {
 		if !slices.Contains(args, required) {
 			t.Errorf("missing %s", required)
