@@ -253,6 +253,35 @@ func (s *Service) Status(identity Identity) (State, error) {
 	return Absent, nil
 }
 
+// CurrentGeneration binds trusted ingress to the exact current PRESENT intent.
+// It never creates, touches TTL, probes, or caches runtime state. Contention fails
+// promptly instead of accumulating admission workers behind a runtime operation.
+// The subsequent Inject must still recheck this Exact under lifecycle serialization;
+// replacement between lookup and injection therefore fails rather than retargets.
+func (s *Service) CurrentGeneration(ctx context.Context, identity Identity) (Exact, error) {
+	if err := ctx.Err(); err != nil {
+		return Exact{}, err
+	}
+	if !s.mu.TryLock() {
+		return Exact{}, ErrNotReady
+	}
+	defer s.mu.Unlock()
+	if err := s.admitted(identity); err != nil {
+		return Exact{}, err
+	}
+	e, ok := s.entries[identity.key]
+	if !ok {
+		return Exact{}, ErrStaleGeneration
+	}
+	if !s.present(e) {
+		return Exact{}, ErrNotReady
+	}
+	if s.backend.hasLifecycle(e) {
+		return Exact{}, ErrOutcomeUnknown
+	}
+	return e, nil
+}
+
 func clone(entries map[WorkspaceKey]Exact) map[WorkspaceKey]Exact {
 	next := make(map[WorkspaceKey]Exact, len(entries))
 	for w, e := range entries {

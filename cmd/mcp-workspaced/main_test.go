@@ -23,7 +23,7 @@ func TestSmokeMCP(t *testing.T) {
 }
 
 // Exercise HTTP, protocol negotiation, schema inference and tool dispatch using
-// a test-only echo tool. No product tools or network listener are shipped.
+// a test-only echo tool. Production composition is covered in ingress_test.go.
 func TestSDKStreamableHTTP(t *testing.T) {
 	for _, protocol := range []string{"2025-11-25", "2026-07-28"} {
 		t.Run(protocol, func(t *testing.T) {

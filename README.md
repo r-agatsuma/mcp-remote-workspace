@@ -4,7 +4,7 @@ Go MCP baseline and host-side lifecycle core for `mcp-workspaced`. The module pa
 `github.com/r-agatsuma/mcp-remote-workspace` and the command lives at
 `cmd/mcp-workspaced`.
 
-The command includes a daemon skeleton and a bounded local MCP smoke check.
+The command includes a loopback MCP daemon and a bounded local MCP smoke check.
 Running without arguments prints usage and exits; `-smoke` connects an SDK client
 and server in memory using MCP `2025-11-25`, checks server identity/capabilities,
 pings, verifies an empty
@@ -12,8 +12,10 @@ tool list, closes the sessions, and exits. The whole operation has a five-second
 deadline and returns a nonzero status on failure. It opens no network listener.
 The lifecycle core implements trusted conversation identity, durable exact-generation
 create/destroy, singleton ownership and startup reconciliation. `-daemon` owns and
-reconciles local state until shutdown; it opens no network listener and exposes no
-product tools. See [the lifecycle contract](docs/lifecycle.md) for configuration,
+reconciles local state before serving the five product tools at the explicit
+`-mcp-listen 127.0.0.1:8080` endpoint, path `/mcp`. See
+[production ingress](docs/ingress.md) for trusted-host prerequisites and bounds, and
+[the lifecycle contract](docs/lifecycle.md) for configuration,
 trust boundaries and failure behavior. Reusable generation, process, backend,
 TTL and shared-pool storage controls are described in [the admission contract](docs/admission.md).
 Embedded servers can register `workspace_create`, `workspace_destroy`, `exec`,
@@ -57,8 +59,10 @@ a local Go-supported race platform and C compiler. Tests exercise the empty
 skeleton over the SDK's JSON transport and use a loopback HTTP server plus a
 test-only echo tool to check Streamable HTTP, protocol negotiation, schema
 inference, tool discovery and dispatch for MCP `2025-11-25` and `2026-07-28`.
-The HTTP test configuration is an SDK suitability probe, not a production
-transport or authentication contract.
+Additional component tests construct the production ingress over local HTTP with
+an in-memory Runtime, covering identity admission, exact-generation dispatch,
+startup ordering, cancellation, shutdown and resource bounds. These tests do not
+prove real OpenAI metadata delivery or Tunnel compatibility.
 
 Inspect the locally built artifact with `go version -m ./mcp-workspaced` if needed.
 Lifecycle tests use fake runtimes, stub CLI responses and a local stub executable;
@@ -67,8 +71,8 @@ partial failures, stale callbacks, durable recovery, process-lock conflicts and
 reconciliation admission gates.
 These checks establish local source/build behavior only. Target-host execution,
 linkage, CGO/shared-library behavior and portability require separate verification
-of the delivered revision in external verification Issues (#68 for the baseline,
-#69 for this lifecycle slice).
+of the delivered revision under #90: #95 dirty-OCI integration and #96 clean
+ChatGPT/Tunnel E2E. Independent source review is also required before landing.
 
 See [the dependency inventory](docs/dependencies.md) for versions, provenance and
 the scope of the SDK adoption evidence.

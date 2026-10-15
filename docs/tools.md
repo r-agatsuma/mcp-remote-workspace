@@ -140,3 +140,16 @@ ordinary production `*Podman` probe and all three tool paths, including inherite
 limits, subtree membership, PID/cgroup reuse and fail-closed behavior. Fixture
 helper/probe execution is not OCI validation. Real Podman
 verification of the delivered exact revision remains external Issue #71 scope.
+
+## Production admission
+
+The daemon supplies the `RegisterTools` callback from its loopback HTTP admission
+boundary; see [production ingress](ingress.md). `Service.CurrentGeneration` reads
+the exact current PRESENT intent under the existing lifecycle lock. It fails
+promptly on contention or a non-PRESENT candidate, and never creates, probes,
+refreshes activity or caches a target. An absent workspace returns
+`generation_unavailable`; BUILDING/FINALIZING returns `not_ready`. Outstanding
+uncertain lifecycle work remains fail-closed. The subsequent existing `Inject`
+rechecks the same W+G, so replacement after lookup rejects the old operation
+rather than selecting the new generation. Create/destroy retain Service-owned
+generation selection. This adds no public identity or generation parameter.
