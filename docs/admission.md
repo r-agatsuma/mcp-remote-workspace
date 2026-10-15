@@ -40,6 +40,14 @@ weight, PID limit and equal NOFILE soft/hard limits to creation. The daemon give
 same. These flags are locally tested with stub commands; their real-host behavior
 is external validation scope.
 
+P5 Dockerfile candidates use those same generation slots and backend ledger.
+Acceptance reserves a create operation and a build-control operation so stopping
+an uncertain build remains accounted even when it overlaps live work. Definite
+build completion releases the control reservation; sequential finalization uses
+the original create reservation. Diagnostics alone retain no live permit.
+Generation cleanup remains required before freeing its slot. Build parents use
+the configured 512 task ceiling, never the 513-task migration observation allowance.
+
 ## Generations and process injection
 
 Durable PRESENT intent consumes a generation slot, including missing runtime
@@ -120,7 +128,9 @@ short idle TTL); benign stale hints are ignored. An unresolved cleanup error
 stops the daemon with intent preserved, requiring host recovery.
 
 Journal version 2 persists chronology, pending operations, the operation counter,
-and the storage-recovery latch. Empty version 1 journals are accepted. Nonempty
+and the storage-recovery latch. Its lifetime entries may additionally carry optional
+exact build phase/image intent; no other persistence authority is introduced.
+Empty version 1 journals are accepted. Nonempty
 version 1 journals have no trusted creation/activity time and fail closed before
 runtime access. Operators must resolve prior lifecycle intent with the prior
 version before upgrading, or supply independently verified chronology as an

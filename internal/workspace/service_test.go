@@ -406,7 +406,7 @@ func TestReconciliationRejectsUnknownAndLookalikeObjects(t *testing.T) {
 			lifetimes := make(map[Exact]Lifetime)
 			now := time.Now()
 			for _, entry := range entries {
-				lifetimes[entry] = Lifetime{entry, now, now}
+				lifetimes[entry] = Lifetime{Exact: entry, Created: now, Activity: now}
 			}
 			if err := writeAdmissionJournal(filepath.Join(cfg.StateDir, "journal.json"), cfg.Image, entries, lifetimes, false, BackendState{Next: 1}); err != nil {
 				t.Fatal(err)

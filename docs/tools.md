@@ -1,15 +1,30 @@
-# Exec and text tools (P3a)
+# Workspace tools
 
 `Service.Exec`, `ReadText` and `WriteText` require a trusted `Identity` and the
 already admitted `Exact` PRESENT generation. They never create, repair, restart,
 retarget or retry a generation. `RegisterTools(server, service, admit)` installs
-the public MCP `exec`, `read_text` and `write_text` tools on an embedded server.
+the public MCP `workspace_create`, `workspace_destroy`, `exec`, `read_text` and
+`write_text` tools on an embedded server.
 The host-supplied admission callback must attest identity and bind the exact
 generation; caller arguments and unverified wire `_meta` cannot supply authority.
+For create/destroy the callback attests identity and may return a zero Exact;
+the lifecycle service selects the exact current candidate itself.
 Registration opens no listener. The command's smoke server remains tool-free,
 and the daemon still supplies no product ingress.
 
 ## Requests and results
+
+`workspace_create` takes optional `dockerfile` text and returns
+`{"status":"PROCESSING"}` for an accepted asynchronous candidate or
+`{"status":"PRESENT"}` for the existing/finalized generation. Omission retains
+canonical creation; empty/null supplied text does not. Polling BUILDING/FINALIZING
+or creating against PRESENT ignores newly supplied text. A definite terminal
+failure returns bounded `build_failed` and drives exact cleanup; replacement
+requires a later create after ABSENT. Uncertainty returns `outcome_unknown`,
+preserving the exact candidate for recovery. No workspace or job ID is exposed.
+`workspace_destroy` takes no arguments and returns `{"status":"ABSENT"}` only
+after exact cleanup. During cancellation it may return uncertainty until trusted
+terminal handling completes. See [the lifecycle contract](lifecycle.md#dockerfile-creation-p5).
 
 `exec` takes `argv` (1–256 strings), optional absolute container `cwd` (default
 `/`), string-to-string `env` overlay, UTF-8 `stdin` and boolean `detach` (default

@@ -78,6 +78,8 @@ type Service struct {
 	backend        *BackendLedger
 	injections     map[Exact]*BackendPermit
 	toolTimeout    time.Duration
+	workers        map[Exact]context.CancelFunc
+	workerDone     sync.WaitGroup
 }
 
 // Open obtains the account-wide singleton before constructing or discovering
@@ -144,9 +146,12 @@ func open(ctx context.Context, cfg Config, factory func() Runtime, lockPath stri
 		return nil, err
 	}
 	s := &Service{runtime: factory(), image: cfg.Image, path: filepath.Join(cfg.StateDir, "journal.json"), lock: lock, save: writeAdmissionJournal,
-		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout}
+		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout, workers: make(map[Exact]context.CancelFunc)}
 	if s.runtime == nil {
 		return nil, errors.New("runtime is required")
+	}
+	if podman, ok := s.runtime.(*Podman); ok {
+		podman.buildDataDir = s.dataDir
 	}
 	if err := s.reconcile(ctx); err != nil {
 		return nil, err
@@ -181,7 +186,7 @@ func (s *Service) reconcile(ctx context.Context) error {
 	if err := s.runtime.Initialize(ctx); err != nil {
 		return err
 	}
-	if _, err := discover(ctx, s.runtime, entries, s.image); err != nil {
+	if _, err := discover(ctx, s.runtime, entries, s.image, lifetimes); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -190,13 +195,31 @@ func (s *Service) reconcile(ctx context.Context) error {
 	// Missing runtime objects retain PRESENT intent: startup does not repair,
 	// restart, replace, or erase incomplete create/destroy operations.
 	s.entries, s.lifetimes, s.storageBlocked, s.ready = entries, lifetimes, blocked, true
+	changed := false
+	for _, life := range lifetimes {
+		if life.Build != nil && (life.Build.Phase == buildBuilding || life.Build.Phase == buildFinalizing) {
+			life.Build.Phase = buildRecovery
+			changed = true
+		}
+	}
+	if changed {
+		if err := s.commit(clone(entries)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (s *Service) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.ready = false
+	for _, cancel := range s.workers {
+		cancel()
+	}
+	s.mu.Unlock()
+	s.workerDone.Wait()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.lock == nil {
 		return nil
 	}
@@ -222,6 +245,9 @@ func (s *Service) Status(identity Identity) (State, error) {
 		return "", err
 	}
 	if _, ok := s.entries[identity.key]; ok {
+		if !s.present(s.entries[identity.key]) {
+			return "", ErrNotReady
+		}
 		return Present, nil
 	}
 	return Absent, nil
@@ -245,65 +271,110 @@ func (s *Service) commit(next map[WorkspaceKey]Exact) error {
 }
 
 func (s *Service) Create(ctx context.Context, identity Identity) (Exact, error) {
+	result, err := s.CreateWorkspace(ctx, identity, nil)
+	return result.Exact, err
+}
+
+// CreateWorkspace accepts optional Dockerfile text. Exact is host-only; public
+// responses expose only Status, never a workspace or build identifier.
+func (s *Service) CreateWorkspace(ctx context.Context, identity Identity, dockerfile *string) (CreateResult, error) {
+	e, status, err := s.createWorkspace(ctx, identity, dockerfile)
+	return CreateResult{Exact: e, Status: status}, err
+}
+
+func (s *Service) createWorkspace(ctx context.Context, identity Identity, dockerfile *string) (Exact, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.admitted(identity); err != nil {
-		return Exact{}, err
+		return Exact{}, "", err
 	}
 	if s.storageBlocked {
-		return Exact{}, ErrStorageRecovery
+		return Exact{}, "", ErrStorageRecovery
 	}
 	if current, present := s.entries[identity.key]; present {
 		if err := s.touch(current); err != nil {
-			return Exact{}, err
+			return Exact{}, "", err
 		}
-		return current, nil
+		return s.observeCreate(ctx, current)
 	}
 	if err := ctx.Err(); err != nil {
-		return Exact{}, err
+		return Exact{}, "", err
 	}
-	if _, err := discover(ctx, s.runtime, s.entries, s.image); err != nil {
-		return Exact{}, err
+	if _, err := discover(ctx, s.runtime, s.entries, s.image, s.lifetimes); err != nil {
+		return Exact{}, "", err
 	}
 	if err := s.storageAdmission(ctx); err != nil {
-		return Exact{}, err
+		return Exact{}, "", err
 	}
 	if len(s.entries) >= s.policy.MaxGenerations {
-		return Exact{}, ErrGenerationLimit
+		return Exact{}, "", ErrGenerationLimit
+	}
+	if dockerfile != nil {
+		if _, err := dockerfileSources(*dockerfile); err != nil {
+			return Exact{}, "", err
+		}
+		if _, ok := s.runtime.(BuildRuntime); !ok {
+			return Exact{}, "", ErrNotReady
+		}
 	}
 	generation, err := freshGeneration()
 	if err != nil {
-		return Exact{}, err
+		return Exact{}, "", err
 	}
 	e := Exact{identity.key, generation}
 	next := clone(s.entries)
 	next[identity.key] = e
 	permit, err := s.backend.Acquire(e, "create")
 	if err != nil {
-		return Exact{}, err
+		return Exact{}, "", err
+	}
+	var control *BackendPermit
+	if dockerfile != nil {
+		// Reserve recovery capacity in the same ledger before submission. A stop
+		// command may overlap an uncertain build; both count against the limit.
+		control, err = s.backend.Acquire(e, "build-control")
+		if err != nil {
+			_ = permit.Resolve(e, DefinitelyCompleted)
+			return Exact{}, "", err
+		}
 	}
 	now := s.now()
-	s.lifetimes[e] = Lifetime{e, now, now}
+	s.lifetimes[e] = Lifetime{Exact: e, Created: now, Activity: now}
+	if dockerfile != nil {
+		life := s.lifetimes[e]
+		life.Build = &buildIntent{Phase: buildBuilding}
+		s.lifetimes[e] = life
+	}
 	if err := s.commit(next); err != nil {
 		_ = permit.Resolve(e, DefinitelyCompleted) // backend was never started
-		return Exact{}, err
+		if control != nil {
+			_ = control.Resolve(e, DefinitelyCompleted)
+		}
+		return Exact{}, "", err
 	}
 	// Intent is durable before a possibly partial/unknown runtime operation.
+	if dockerfile != nil {
+		workerCtx, cancel := context.WithCancel(context.Background())
+		s.workers[e] = cancel
+		s.workerDone.Add(1)
+		go s.buildCandidate(workerCtx, e, *dockerfile, permit, control)
+		return e, "PROCESSING", nil
+	}
 	err = s.runtime.Create(ctx, e, s.image)
 	if saveErr := s.accountRuntime(permit, err); saveErr != nil {
-		return e, errors.Join(err, saveErr)
+		return e, "", errors.Join(err, saveErr)
 	}
 	if err != nil {
-		return e, err
+		return e, "", err
 	}
-	objects, err := discover(ctx, s.runtime, s.entries, s.image)
+	objects, err := discover(ctx, s.runtime, s.entries, s.image, s.lifetimes)
 	if err != nil {
-		return e, err
+		return e, "", err
 	}
 	if _, exists := objects[e]; !exists {
-		return e, errors.New("created generation could not be confirmed")
+		return e, "", errors.New("created generation could not be confirmed")
 	}
-	return e, nil
+	return e, "PRESENT", nil
 }
 
 func (s *Service) Destroy(ctx context.Context, identity Identity) error {
@@ -360,7 +431,17 @@ func (s *Service) destroy(ctx context.Context, e Exact) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := discover(ctx, s.runtime, s.entries, s.image); err != nil {
+	if life := s.lifetimes[e]; life.Build != nil {
+		life.Build.Phase = buildRecovery
+		if err := s.commit(clone(s.entries)); err != nil {
+			return err
+		}
+		if cancel := s.workers[e]; cancel != nil {
+			cancel()
+			return ErrOutcomeUnknown
+		}
+	}
+	if _, err := discover(ctx, s.runtime, s.entries, s.image, s.lifetimes); err != nil {
 		return err
 	}
 	if s.backend.has(e) {
@@ -375,13 +456,24 @@ func (s *Service) destroy(ctx context.Context, e Exact) error {
 		return err
 	}
 	err = s.runtime.Destroy(ctx, e)
+	if err == nil && s.lifetimes[e].Build != nil {
+		builder, ok := s.runtime.(BuildRuntime)
+		if !ok {
+			err = ErrNotReady
+		} else {
+			err = builder.CleanupBuild(ctx, e, s.dataDir, s.lifetimes[e].Build.Image)
+		}
+	}
 	if saveErr := s.accountRuntime(permit, err); saveErr != nil {
 		return errors.Join(err, saveErr)
 	}
 	if err != nil {
+		if s.lifetimes[e].Build != nil && completionOf(err) == OutcomeUnknown {
+			return errors.Join(ErrOutcomeUnknown, err)
+		}
 		return err
 	}
-	objects, err := discover(ctx, s.runtime, s.entries, s.image)
+	objects, err := discover(ctx, s.runtime, s.entries, s.image, s.lifetimes)
 	if err != nil {
 		return err
 	}

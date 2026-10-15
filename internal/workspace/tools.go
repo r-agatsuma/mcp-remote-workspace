@@ -105,6 +105,10 @@ func mapToolError(err error) error {
 		}
 	}
 	switch {
+	case errors.Is(err, ErrBuildFailed):
+		return toolError("build_failed", "Workspace build or finalization failed. A later create can be accepted only after exact cleanup.", err)
+	case errors.Is(err, ErrDockerfile):
+		return toolError("invalid_dockerfile", "Dockerfile is invalid or its sources/isolation settings are unsupported.", err)
 	case errors.Is(err, context.DeadlineExceeded):
 		return toolError("timeout", "Request timed out.", err)
 	case errors.Is(err, context.Canceled):

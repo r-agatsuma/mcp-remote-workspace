@@ -59,7 +59,7 @@ func classify(o Object) (Exact, bool, error) {
 	}
 	e := Exact{WorkspaceKey(o.Labels[workspaceLabel]), Generation(o.Labels[generationLabel])}
 	if e.validate() != nil || o.Name != objectName(e) || o.Labels[ownerLabel] != ownerValue ||
-		!validImage(o.Image) || o.Labels[imageLabel] != o.Image || !validHex(o.ID) {
+		(!validImage(o.Image) && !immutableImage(o.Image)) || o.Labels[imageLabel] != o.Image || !validHex(o.ID) {
 		return Exact{}, false, errors.New("unrecognized service/lookalike runtime object")
 	}
 	return e, true, nil
@@ -71,7 +71,11 @@ func validImage(image string) bool {
 		!strings.ContainsAny(name, " \t\r\n@") && validHex(digest)
 }
 
-func discover(ctx context.Context, runtime Runtime, entries map[WorkspaceKey]Exact, image string) (map[Exact]Object, error) {
+func immutableImage(image string) bool {
+	return strings.HasPrefix(image, "sha256:") && validHex(strings.TrimPrefix(image, "sha256:"))
+}
+
+func discover(ctx context.Context, runtime Runtime, entries map[WorkspaceKey]Exact, image string, lifetimes map[Exact]Lifetime) (map[Exact]Object, error) {
 	objects, err := runtime.List(ctx)
 	if err != nil {
 		return nil, err
@@ -85,7 +89,11 @@ func discover(ctx context.Context, runtime Runtime, entries map[WorkspaceKey]Exa
 		if !owned {
 			continue
 		}
-		if entries[e.Workspace] != e || o.Image != image {
+		expected := image
+		if lifetimes[e].Build != nil {
+			expected = lifetimes[e].Build.Image
+		}
+		if entries[e.Workspace] != e || o.Image != expected {
 			return nil, fmt.Errorf("runtime generation has no matching canonical journal intent: %s", o.Name)
 		}
 		if _, duplicate := known[e]; duplicate {

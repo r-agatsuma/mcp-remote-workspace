@@ -1,11 +1,11 @@
 # Dependency inventory
 
-The only direct non-standard-library module is
-**`github.com/modelcontextprotocol/go-sdk v1.8.0`**. `go.mod` pins selected versions
-and `go.sum` records downloaded module checksums. There are no replacements or
-additional convenience/framework dependencies.
+`go.mod` pins selected versions and `go.sum` records downloaded module checksums.
+There are no replacements. The SDK remains the MCP implementation; P5 adds focused
+Dockerfile syntax/image-reference parsing and imports Go's Linux syscall bindings
+directly. No build engine, daemon or network authority is embedded.
 
-## Direct dependency decision
+## MCP dependency decision
 
 - **Required capability:** official MCP client/server types, JSON-RPC transport,
   protocol negotiation, tool schemas/discovery/dispatch and Streamable HTTP.
@@ -35,36 +35,37 @@ additional convenience/framework dependencies.
   remote runtime behavior or full protocol conformance. A later concrete gap
   requiring another dependency/product decision must be reported before adding it.
 
-## Transitive modules selected by this baseline
+## P5 parsing and Linux dependencies
 
-These eight modules appear as `// indirect` requirements after `go mod tidy` and
-in `go list -deps ./cmd/mcp-workspaced`. They are brought in by the approved SDK;
-project source imports none of them directly. Inclusion in a package dependency
-graph does not establish which code survives binary linking.
-
-| Exact module/version | SDK dependency purpose | Maintainer/provenance |
+| Direct module/version | Capability and rationale | Provenance/license |
 | --- | --- | --- |
-| `github.com/google/jsonschema-go v0.4.3` | Tool schema inference and validation | Google, [upstream](https://github.com/google/jsonschema-go) |
-| `github.com/segmentio/encoding v0.5.4` | SDK internal JSON encoding/decoding | Segmentio, [upstream](https://github.com/segmentio/encoding) |
-| `github.com/segmentio/asm v1.1.3` | Low-level support for Segmentio encoding | Segmentio, [upstream](https://github.com/segmentio/asm) |
-| `github.com/yosida95/uritemplate/v3 v3.0.2` | MCP resource URI templates | yosida95, [upstream](https://github.com/yosida95/uritemplate) |
-| `golang.org/x/oauth2 v0.35.0` | SDK auth package used by MCP transports | Go project, [upstream](https://go.googlesource.com/oauth2) |
-| `golang.org/x/sync v0.20.0` | SDK multi-round-trip request concurrency | Go project, [upstream](https://go.googlesource.com/sync) |
-| `golang.org/x/sys v0.41.0` | Platform primitives used by Segmentio assembly support | Go project, [upstream](https://go.googlesource.com/sys) |
-| `golang.org/x/time v0.15.0` | SDK logging rate limiting | Go project, [upstream](https://go.googlesource.com/time) |
+| `github.com/moby/buildkit v0.34.0` | Only `frontend/dockerfile/parser` and `shell` are imported. Maintained parsing handles stages, continuation, heredocs and quoted label keys without a custom Dockerfile frontend. Service code retains source/isolation policy. | [Moby BuildKit](https://github.com/moby/buildkit/tree/v0.34.0/frontend/dockerfile), Apache-2.0 |
+| `github.com/distribution/reference v0.6.0` | Standard image-reference syntax, including short names and digests; avoids a custom registry grammar. No image fetching or engine integration. | [Distribution](https://github.com/distribution/reference/tree/v0.6.0), Apache-2.0 |
+| `golang.org/x/sys v0.48.0` | Direct Linux openat2, fd-relative removal and fchmodat2 bindings for narrow exact Data cleanup; replaces hand-written syscall ABI code. Previously indirect. | [Go project](https://go.googlesource.com/sys/+/refs/tags/v0.48.0), BSD-3-Clause |
 
-The complete `go list -m all` graph also includes the following modules, absent
-from this command's package dependency graph. They are recorded to distinguish
-SDK/test/subpackage module requirements from command dependencies:
+The parser raises the Go module minimum to 1.26.8; the preferred toolchain remains
+1.26.9. The imported BuildKit packages provide syntax and diagnostic types only;
+this service still invokes host Podman/Buildah. The module graph includes BuildKit's
+other engine/cloud dependencies, but those packages are not command dependencies.
+The following indirect modules occur in the command's package graph after tidy:
 
-| Exact module/version | Reason in module graph | Maintainer/provenance |
-| --- | --- | --- |
-| `github.com/google/go-cmp v0.7.0` | Upstream test comparisons | Google, [upstream](https://github.com/google/go-cmp) |
-| `github.com/golang-jwt/jwt/v5 v5.3.1` | SDK OAuth extension tests | golang-jwt maintainers, [upstream](https://github.com/golang-jwt/jwt) |
-| `golang.org/x/tools v0.42.0` | SDK conformance-test archive utilities | Go project, [upstream](https://go.googlesource.com/tools) |
-| `cloud.google.com/go/compute/metadata v0.3.0` | OAuth2 module's Google-specific subpackage dependency | Google Cloud Go maintainers, [upstream](https://github.com/googleapis/google-cloud-go/tree/main/compute/metadata) |
+| Module/version | Purpose |
+| --- | --- |
+| `github.com/containerd/typeurl/v2 v2.3.0` | BuildKit parser diagnostic type registration |
+| `github.com/google/jsonschema-go v0.4.3` | MCP schema validation |
+| `github.com/opencontainers/go-digest v1.0.0` | Image-reference digest syntax |
+| `github.com/pkg/errors v0.9.1` | Parser error context |
+| `github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10` | Generated BuildKit diagnostic serialization |
+| `github.com/segmentio/asm v1.1.3` | SDK encoding support |
+| `github.com/segmentio/encoding v0.5.4` | SDK JSON encoding |
+| `github.com/yosida95/uritemplate/v3 v3.0.2` | MCP URI templates |
+| `golang.org/x/oauth2 v0.35.0` | SDK transport auth |
+| `golang.org/x/sync v0.23.0` | SDK request concurrency; version selected by BuildKit |
+| `golang.org/x/time v0.16.0` | SDK rate limiting; version selected by BuildKit |
+| `google.golang.org/protobuf v1.36.12` | BuildKit diagnostic types |
 
-To audit the selected graph and command package dependencies locally:
+To audit the complete selected module graph separately from command package
+imports, and verify cached module checksums:
 
 ```sh
 go list -m all

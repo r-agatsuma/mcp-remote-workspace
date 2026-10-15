@@ -51,7 +51,7 @@ func TestPublicToolsDiscoveryDispatchAndBoundedErrors(t *testing.T) {
 	}
 	defer cs.Close()
 	list, err := cs.ListTools(ctx, nil)
-	if err != nil || len(list.Tools) != 3 {
+	if err != nil || len(list.Tools) != 5 {
 		t.Fatal(list, err)
 	}
 	names := map[string]bool{}
@@ -61,7 +61,7 @@ func TestPublicToolsDiscoveryDispatchAndBoundedErrors(t *testing.T) {
 			t.Fatal("missing schema")
 		}
 	}
-	if !names["exec"] || !names["read_text"] || !names["write_text"] {
+	if !names["exec"] || !names["read_text"] || !names["write_text"] || !names["workspace_create"] || !names["workspace_destroy"] {
 		t.Fatal(names)
 	}
 	for _, call := range []struct {
@@ -69,6 +69,7 @@ func TestPublicToolsDiscoveryDispatchAndBoundedErrors(t *testing.T) {
 		args any
 		want string
 	}{
+		{"workspace_create", map[string]any{"dockerfile": "invalid text is ignored on PRESENT"}, `{"status":"PRESENT"}`},
 		{"exec", map[string]any{"argv": []string{"echo", "$HOME;literal"}}, `"exit_status":0`},
 		{"exec", map[string]any{"argv": []string{"sleep", "1"}, "detach": true}, `{"status":"started"}`},
 		{"read_text", map[string]any{"path": "/f"}, `{"text":"UTF-8 text"}`},
@@ -88,6 +89,9 @@ func TestPublicToolsDiscoveryDispatchAndBoundedErrors(t *testing.T) {
 		name string
 		args any
 	}{
+		{"workspace_create", map[string]any{"dockerfile": nil}},
+		{"workspace_create", map[string]any{"context_path": "/host/path"}},
+		{"workspace_destroy", map[string]any{"generation": "caller-selected"}},
 		{"exec", map[string]any{"argv": []string{}}},
 		{"exec", map[string]any{"argv": []any{nil}}},
 		{"exec", map[string]any{"argv": []string{"x"}, "env": map[string]any{"A": nil}}},

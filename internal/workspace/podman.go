@@ -31,7 +31,11 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 }
 
 func (c localCLI) run(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, c.path, append([]string{"--remote=false"}, args...)...)
+	return runHostCommand(ctx, c.path, append([]string{"--remote=false"}, args...)...)
+}
+
+func hostCommand(ctx context.Context, path string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, path, args...)
 	// No caller-controlled connection settings, engine socket or shell. HOME
 	// and runtime directory belong to the service account's launch environment.
 	for _, key := range []string{"HOME", "PATH", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "DBUS_SESSION_BUS_ADDRESS"} {
@@ -40,6 +44,11 @@ func (c localCLI) run(ctx context.Context, args ...string) ([]byte, error) {
 		}
 	}
 	cmd.WaitDelay = time.Second
+	return cmd
+}
+
+func runHostCommand(ctx context.Context, path string, args ...string) ([]byte, error) {
+	cmd := hostCommand(ctx, path, args...)
 	var stdout, stderr boundedOutput
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -57,6 +66,8 @@ type Podman struct {
 	policy      *Policy
 	// Host-owned read-only proc/cgroup roots. Nil selects verified Linux mounts.
 	processRoots func() (*os.Root, *os.Root, error)
+	buildDNS     []string // service/deployment-owned public resolver defaults
+	buildDataDir string
 }
 
 func NewPodman(path, image string) *Podman {
@@ -64,7 +75,7 @@ func NewPodman(path, image string) *Podman {
 }
 
 func NewPodmanWithPolicy(path, image string, policy Policy) *Podman {
-	return &Podman{runner: localCLI{path}, image: image, policy: &policy}
+	return &Podman{runner: localCLI{path}, image: image, policy: &policy, buildDNS: []string{"1.1.1.1", "8.8.8.8"}}
 }
 
 func (p *Podman) resourcePolicy() Policy {
@@ -110,6 +121,7 @@ func (p *Podman) Initialize(ctx context.Context) error {
 
 type containerInspection struct {
 	ID        string `json:"Id"`
+	Image     string
 	Name      string
 	ImageName string
 	Config    struct{ Labels map[string]string }
@@ -123,7 +135,14 @@ type containerInspection struct {
 }
 
 func (v containerInspection) object() Object {
-	return Object{ID: v.ID, Name: v.Name, Labels: v.Config.Labels, Image: v.ImageName}
+	image := v.ImageName
+	if claimed := v.Config.Labels[imageLabel]; immutableImage(claimed) {
+		image = "" // a matching mutable name cannot substitute for actual image ID
+		if strings.TrimPrefix(v.Image, "sha256:") == strings.TrimPrefix(claimed, "sha256:") {
+			image = claimed
+		}
+	}
+	return Object{ID: v.ID, Name: v.Name, Labels: v.Config.Labels, Image: image}
 }
 
 func (p *Podman) inspectContainer(ctx context.Context, id string) (containerInspection, error) {
@@ -201,7 +220,7 @@ func (p *Podman) List(ctx context.Context) ([]Object, error) {
 		if _, owned, err := classify(o); err != nil || !owned {
 			return nil, errors.New("unrecognized service runtime object")
 		}
-		if o.Image != p.image {
+		if o.Image != p.image && !immutableImage(o.Image) {
 			return nil, errors.New("runtime object has a different canonical image")
 		}
 		objects = append(objects, o)
@@ -217,11 +236,23 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) (err error) 
 	if err := e.validate(); err != nil {
 		return err
 	}
-	if !validImage(image) || image != p.image {
+	if !immutableImage(image) && (image != p.image || !validImage(image)) {
 		return errors.New("digest-pinned canonical image required")
+	}
+	if immutableImage(image) {
+		if err := p.confirmBuiltImage(ctx, e, image); err != nil {
+			return err
+		}
 	}
 	args := []string{"container", "create", "--pull=never", "--name", objectName(e),
 		"--network=none", "--image-volume=ignore", "--cap-drop=ALL", "--security-opt=no-new-privileges"}
+	if immutableImage(image) {
+		// Image metadata cannot select a healthcheck, hook or implicit host mount.
+		if p.buildDataDir == "" {
+			return ErrNotReady
+		}
+		args = append(args, "--no-healthcheck", "--hooks-dir="+filepath.Join(buildDirectory(p.buildDataDir, e), "hooks"), "--http-proxy=false")
+	}
 	policy := p.resourcePolicy()
 	args = append(args, "--memory="+strconv.FormatInt(policy.MemoryBytes, 10),
 		"--memory-swap="+strconv.FormatInt(policy.MemoryBytes+policy.SwapBytes, 10),

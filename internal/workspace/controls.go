@@ -190,6 +190,9 @@ func (s *Service) BeginBackend(e Exact, kind string) (BackendOperation, error) {
 	if s.entries[e.Workspace] != e {
 		return BackendOperation{}, ErrStaleGeneration
 	}
+	if !s.present(e) {
+		return BackendOperation{}, ErrNotReady
+	}
 	life, now := s.lifetimes[e], s.now()
 	if !now.Before(life.Created.Add(s.policy.AbsoluteTTL)) {
 		return BackendOperation{}, ErrAbsoluteTTL
@@ -250,6 +253,9 @@ func (s *Service) Inject(ctx context.Context, identity Identity, e Exact, submit
 	}
 	if identity.key != e.Workspace || s.entries[e.Workspace] != e {
 		return BackendOperation{}, ErrStaleGeneration
+	}
+	if !s.present(e) {
+		return BackendOperation{}, ErrNotReady
 	}
 	if s.storageBlocked {
 		return BackendOperation{}, ErrStorageRecovery
