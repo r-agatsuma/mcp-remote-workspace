@@ -67,7 +67,7 @@ func (f *fakeRuntime) Destroy(ctx context.Context, e Exact) error {
 }
 
 func testConfig(dir string) Config {
-	return Config{StateDir: dir, Image: testImage, PodmanPath: "/stub/podman", Storage: storageFunc(func(context.Context, string) (StorageSample, error) { return StorageSample{1 << 40, 1 << 30}, nil })}
+	return Config{PublicDNS: []string{"9.9.9.9"}, StateDir: dir, Image: testImage, PodmanPath: "/stub/podman", Storage: storageFunc(func(context.Context, string) (StorageSample, error) { return StorageSample{1 << 40, 1 << 30}, nil })}
 }
 func newFake() *fakeRuntime { return &fakeRuntime{objects: make(map[Exact]Object)} }
 func openFake(t *testing.T, f *fakeRuntime) (*Service, Config, string) {

@@ -22,6 +22,7 @@ const (
 )
 
 type Config struct {
+	PublicDNS   []string // required deployment-owned resolver IPs; copied at Open
 	StateDir    string
 	Image       string           // digest-pinned canonical image, supplied by the operator
 	PodmanPath  string           // absolute host-side executable path
@@ -44,6 +45,9 @@ func DefaultStateDir() (string, error) {
 }
 
 func (c Config) Validate() error {
+	if _, err := validatedPublicDNS(c.PublicDNS); err != nil {
+		return err
+	}
 	if c.ToolTimeout < 0 {
 		return errors.New("tool timeout must be positive or zero for default")
 	}
@@ -107,6 +111,10 @@ func privateDir(path string) error {
 }
 
 func open(ctx context.Context, cfg Config, factory func() Runtime, lockPath string) (_ *Service, err error) {
+	cfg.PublicDNS, err = validatedPublicDNS(cfg.PublicDNS)
+	if err != nil {
+		return nil, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -151,7 +159,8 @@ func open(ctx context.Context, cfg Config, factory func() Runtime, lockPath stri
 		return nil, errors.New("runtime is required")
 	}
 	if podman, ok := s.runtime.(*Podman); ok {
-		podman.buildDataDir = s.dataDir
+		podman.publicDNS = append([]string(nil), cfg.PublicDNS...)
+		podman.profileDir = filepath.Join(cfg.StateDir, "runtime-profile")
 	}
 	if err := s.reconcile(ctx); err != nil {
 		return nil, err

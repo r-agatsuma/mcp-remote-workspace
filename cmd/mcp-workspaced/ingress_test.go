@@ -115,7 +115,7 @@ func ingressConfig(t *testing.T) workspace.Config {
 	t.Helper()
 	p := workspace.ReferencePolicy()
 	p.MaxGenerations = 8
-	return workspace.Config{StateDir: filepath.Join(t.TempDir(), "state"), Image: "example.invalid/test@sha256:" + strings.Repeat("a", 64), PodmanPath: "/unused/podman", Storage: ingressStorage{}, Policy: &p}
+	return workspace.Config{PublicDNS: []string{"9.9.9.9"}, StateDir: filepath.Join(t.TempDir(), "state"), Image: "example.invalid/test@sha256:" + strings.Repeat("a", 64), PodmanPath: "/unused/podman", Storage: ingressStorage{}, Policy: &p}
 }
 func serveIngress(t *testing.T) (*ingress, *workspace.Service, *ingressRuntime, string) {
 	t.Helper()
@@ -324,7 +324,7 @@ func TestIngressNonAuthoritativeInputs(t *testing.T) {
 		t.Fatal("headers supplied missing identity", status)
 	}
 	pair := `{"openai/subject":"actual-subject","openai/session":"actual-session"}`
-	for _, key := range []string{"workspace_id", "user_id", "session_id", "generation", "_meta"} {
+	for _, key := range []string{"workspace_id", "user_id", "session_id", "generation", "_meta", "dns", "public_dns", "network", "publish", "add_host"} {
 		args, _ := json.Marshal(map[string]any{key: "chosen"})
 		status, body := postIngress(t, url, wireCall(pair, string(args)), headers)
 		if status != 200 || !strings.Contains(body, `"isError":true`) {

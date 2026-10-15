@@ -141,7 +141,8 @@ func fixturePodman(t *testing.T, e Exact, policy Policy) (*Podman, *processCLI, 
 		"Status": "running", "Running": true, "Pid": 123, "StartedAt": "2026-10-13T00:00:00Z",
 		"CgroupPath": fixture.cgroupPath,
 	}}
-	p := NewPodmanWithPolicy("/stub/podman", testImage, policy)
+	p := NewPodmanWithPolicy("/stub/podman", testImage, policy, "9.9.9.9")
+	p.profileDir = filepath.Join(t.TempDir(), "profile")
 	p.runner, p.processRoots = cli, fixture.openRoots
 	if err := p.Initialize(context.Background()); err != nil {
 		t.Fatal(err)

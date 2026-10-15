@@ -44,7 +44,7 @@ func podmanStub(t *testing.T, steps ...commandStep) (*Podman, *stubCLI) {
 			t.Errorf("executed %d of %d expected commands", stub.calls, len(steps))
 		}
 	})
-	return &Podman{runner: stub, image: testImage}, stub
+	return &Podman{runner: stub, image: testImage, publicDNS: []string{"9.9.9.9"}, profileDir: filepath.Join(t.TempDir(), "profile")}, stub
 }
 func jsonText(t *testing.T, value any) string {
 	t.Helper()
@@ -116,7 +116,11 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 	e := Exact{identity(t, "s", "c").Workspace(), Generation(strings.Repeat("b", 64))}
 	o := fakeObject(e)
 	create := []string{"container", "create", "--pull=never", "--name", objectName(e),
-		"--network=none", "--image-volume=ignore", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--network=pasta:--no-map-gw,-t,none,-u,none,-T,none,-U,none", "--image-volume=ignore", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--no-healthcheck", "--hooks-dir=PROFILE/hooks", "--default-mounts-file=PROFILE/mounts.conf",
+		"--http-proxy=false", "--no-hosts", "--dns-search=.", "--publish-all=false",
+		"--privileged=false", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private",
+		"--systemd=false", "--sdnotify=ignore", "--seccomp-policy=default", "--dns=9.9.9.9",
 		"--memory=4294967296", "--memory-swap=4294967296", "--cpu-quota=-1", "--cgroup-conf=cpu.weight=100", "--pids-limit=512", "--ulimit=nofile=1024:1024",
 		"--label", generationLabel + "=" + string(e.Generation),
 		"--label", imageLabel + "=" + testImage,
@@ -172,6 +176,9 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 				}
 			}
 			p, _ := podmanStub(t, steps...)
+			for i := range args {
+				args[i] = strings.ReplaceAll(args[i], "PROFILE", p.profileDir)
+			}
 			p.policy = &policy
 			if err := p.Initialize(context.Background()); err != nil {
 				t.Fatal(err)
@@ -283,6 +290,14 @@ func TestLocalCLINeverSelectsRemoteEngine(t *testing.T) {
 	t.Setenv("CONTAINER_HOST", "ssh://must-not-be-used")
 	t.Setenv("CONTAINER_CONNECTION", "must-not-be-used")
 	t.Setenv("DOCKER_HOST", "unix:///must-not-be-used")
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"} {
+		t.Setenv(key, "must-not-be-used")
+	}
+	for _, value := range hostCommand(context.Background(), "/unused").Env {
+		if strings.Contains(value, "must-not-be-used") {
+			t.Fatal("ambient runtime/proxy environment escaped", value)
+		}
+	}
 	path := filepath.Join(t.TempDir(), "stub-podman")
 	script := "#!/bin/sh\n[ -z \"$CONTAINER_HOST$CONTAINER_CONNECTION$DOCKER_HOST\" ] || exit 1\nprintf '%s\\n' \"$@\"\n"
 	if err := os.WriteFile(path, []byte(script), 0700); err != nil {

@@ -66,16 +66,16 @@ type Podman struct {
 	policy      *Policy
 	// Host-owned read-only proc/cgroup roots. Nil selects verified Linux mounts.
 	processRoots func() (*os.Root, *os.Root, error)
-	buildDNS     []string // service/deployment-owned public resolver defaults
-	buildDataDir string
+	publicDNS    []string // service/deployment-owned public resolver defaults
+	profileDir   string   // private service-owned empty hooks/default-mount configuration
 }
 
-func NewPodman(path, image string) *Podman {
-	return NewPodmanWithPolicy(path, image, ReferencePolicy())
+func NewPodman(path, image string, publicDNS ...string) *Podman {
+	return NewPodmanWithPolicy(path, image, ReferencePolicy(), publicDNS...)
 }
 
-func NewPodmanWithPolicy(path, image string, policy Policy) *Podman {
-	return &Podman{runner: localCLI{path}, image: image, policy: &policy, buildDNS: []string{"1.1.1.1", "8.8.8.8"}}
+func NewPodmanWithPolicy(path, image string, policy Policy, publicDNS ...string) *Podman {
+	return &Podman{runner: localCLI{path}, image: image, policy: &policy, publicDNS: append([]string(nil), publicDNS...)}
 }
 
 func (p *Podman) resourcePolicy() Policy {
@@ -87,6 +87,14 @@ func (p *Podman) resourcePolicy() Policy {
 
 func (p *Podman) Initialize(ctx context.Context) error {
 	p.initialized = false
+	resolvers, err := validatedPublicDNS(p.publicDNS)
+	if err != nil {
+		return err
+	}
+	p.publicDNS = resolvers
+	if err := prepareRuntimeProfile(p.profileDir); err != nil {
+		return err
+	}
 	if err := p.resourcePolicy().Validate(); err != nil {
 		return err
 	}
@@ -245,13 +253,14 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) (err error) 
 		}
 	}
 	args := []string{"container", "create", "--pull=never", "--name", objectName(e),
-		"--network=none", "--image-volume=ignore", "--cap-drop=ALL", "--security-opt=no-new-privileges"}
-	if immutableImage(image) {
-		// Image metadata cannot select a healthcheck, hook or implicit host mount.
-		if p.buildDataDir == "" {
-			return ErrNotReady
-		}
-		args = append(args, "--no-healthcheck", "--hooks-dir="+filepath.Join(buildDirectory(p.buildDataDir, e), "hooks"), "--http-proxy=false")
+		"--network=" + workspaceNetwork(), "--image-volume=ignore", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--no-healthcheck", "--hooks-dir=" + filepath.Join(p.profileDir, "hooks"),
+		"--default-mounts-file=" + filepath.Join(p.profileDir, "mounts.conf"),
+		"--http-proxy=false", "--no-hosts", "--dns-search=.", "--publish-all=false",
+		"--privileged=false", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private",
+		"--systemd=false", "--sdnotify=ignore", "--seccomp-policy=default"}
+	for _, dns := range p.publicDNS {
+		args = append(args, "--dns="+dns)
 	}
 	policy := p.resourcePolicy()
 	args = append(args, "--memory="+strconv.FormatInt(policy.MemoryBytes, 10),

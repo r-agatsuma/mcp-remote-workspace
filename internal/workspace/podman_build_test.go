@@ -31,6 +31,11 @@ func TestDockerfileSourcePolicy(t *testing.T) {
 		{"FROM busybox\nONBUILD COPY --from=" + reserved + " /x /y", nil, true},
 		{"ARG BASE=busybox\nFROM ${BASE}", nil, true},
 		{"FROM busybox\nRUN --network=host true", nil, true},
+		{"FROM busybox\nRUN --dns=9.9.9.9 true", nil, true},
+		{"FROM busybox\nRUN --publish=80:80 true", nil, true},
+		{"FROM busybox\nRUN --add-host=host:127.0.0.1 true", nil, true},
+		// Image environment/EXPOSE remain ordinary guest data, not host options.
+		{"FROM busybox\nENV DNS=127.0.0.1 NETWORK=host HTTP_PROXY=http://127.0.0.1\nEXPOSE 8080\nVOLUME /host\nHEALTHCHECK CMD true\nRUN nslookup example.com 8.8.4.4", []string{"busybox"}, false},
 		{"FROM busybox\nRUN --mount=type=bind,from=" + reserved + ",target=/mnt true", nil, true},
 		{"FROM busybox\nARG MOUNT=type=bind,from=" + reserved + ",target=/mnt\nRUN --mount=$MOUNT true", nil, true},
 		{"FROM busybox\nARG FLAG=from\nCOPY --${FLAG}=alpine /x /y", nil, true},
@@ -48,7 +53,7 @@ func TestDockerfileSourcePolicy(t *testing.T) {
 
 func TestBuildCommandsPreserveExactParentResourcesAndNetwork(t *testing.T) {
 	e := Exact{WorkspaceKey(strings.Repeat("a", 64)), Generation(strings.Repeat("b", 64))}
-	p := NewPodman("/usr/bin/podman", testImage)
+	p := NewPodman("/usr/bin/podman", testImage, "1.1.1.1", "8.8.8.8")
 	parent := buildUnit(e) + ".slice:mcpws:" + buildUnit(e)
 	args := p.buildArgs(e, "/data/exact", parent)
 	for _, required := range []string{"--network=" + buildNetwork(e), "--cgroup-parent=" + parent,
