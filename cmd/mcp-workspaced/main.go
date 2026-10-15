@@ -1,4 +1,4 @@
-// mcp-workspaced supplies a local MCP smoke check and host lifecycle skeleton.
+// mcp-workspaced supplies a local MCP smoke check and production loopback service.
 package main
 
 import (
@@ -20,7 +20,8 @@ const serverVersion = "0.0.0-dev"
 
 func main() {
 	smoke := flag.Bool("smoke", false, "check an in-memory MCP connection and exit (5-second deadline)")
-	daemon := flag.Bool("daemon", false, "own and reconcile local lifecycle state until shutdown (no listener)")
+	daemon := flag.Bool("daemon", false, "serve loopback MCP with reconciled lifecycle state until shutdown")
+	listen := flag.String("mcp-listen", "", "required literal loopback IP:port for -daemon; MCP path /mcp")
 	stateDir := flag.String("state-dir", "", "private absolute lifecycle journal directory")
 	image := flag.String("image", "", "canonical locally installed image pinned with @sha256:digest")
 	podmanPath := flag.String("podman", "/usr/bin/podman", "absolute host-side rootless Podman executable")
@@ -64,7 +65,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced: tool-timeout must be positive")
 			os.Exit(2)
 		}
-		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}); err != nil {
+		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}, *listen); err != nil {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
 			os.Exit(1)
 		}

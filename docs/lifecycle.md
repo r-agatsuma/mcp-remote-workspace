@@ -77,7 +77,9 @@ store. `-state-dir` optionally selects an absolute private journal directory;
 the default is `.local/state/mcp-workspaced` under the OS-recorded account home.
 `-podman` selects an absolute host executable (default `/usr/bin/podman`). Startup
 reconciliation finishes before the daemon announces readiness and waits for
-SIGINT/SIGTERM. There is no network admission in this skeleton.
+SIGINT/SIGTERM. `-mcp-listen` explicitly supplies the literal loopback IP and port;
+normal admission starts only after reconciliation. See [production ingress](ingress.md)
+for the request boundary and bounded shutdown behavior.
 
 The adapter runs without a shell, explicitly uses `--remote=false`, drops remote
 connection environment variables and checks `info --format=json` for rootless
