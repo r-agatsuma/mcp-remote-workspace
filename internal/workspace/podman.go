@@ -299,11 +299,17 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) (err error) 
 }
 
 func (p *Podman) Destroy(ctx context.Context, e Exact) (err error) {
-	// Ambiguous removal or fallback must retain backend authority as well as
-	// generation intent. CLI success alone is not an absence proof.
+	// Synchronous preflight failures leave no destructive backend work alive.
+	// Once removal is submitted, ambiguity must retain backend authority as well
+	// as generation intent. Neither classification by itself proves absence.
+	submitted := false
 	defer func() {
 		if err != nil {
-			err = errors.Join(ErrOutcomeUnknown, err)
+			if !submitted {
+				err = CompletedBackendError(err)
+			} else {
+				err = errors.Join(ErrOutcomeUnknown, err)
+			}
 		}
 	}()
 	if err := e.validate(); err != nil {
@@ -334,6 +340,7 @@ func (p *Podman) Destroy(ctx context.Context, e Exact) (err error) {
 		lifetime = 5 * time.Second
 	}
 	ordinary, cancel := context.WithTimeout(ctx, lifetime)
+	submitted = true
 	_, removeErr := p.runner.run(ordinary, "container", "rm", "--force", "--", target)
 	timedOut := ordinary.Err() == context.DeadlineExceeded
 	cancel()

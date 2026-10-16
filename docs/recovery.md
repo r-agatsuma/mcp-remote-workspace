@@ -25,7 +25,7 @@ Reconciliation never backfills missing epochs or upgrades them into evidence.
 | `create`, canonical | Exact candidate; local create/start commands and possible container | Trusted adapter terminal return; generation remains until exact cleanup | Different recorded BootID proves prior execution terminal; container existence/absence alone does not |
 | `create`, Dockerfile | Exact build phase/image/Data/parent, followed by finalization under the same reservation | Terminal build and drains, exact parent termination, then terminal finalization | Different BootID releases the selected reservation only; build result stays unknown and residue stays owned |
 | `build-control` | Reserved capacity for exact parent/control operations | Terminal build/control return | Different BootID; parent absence alone cannot prove an outside submitter/control command finished |
-| `destroy` | Exact container removal and optional Buildah/image/parent/Data cleanup | Completed exact cleanup and independent absence checks | Different BootID proves backend terminality; cleanup must still establish absence separately |
+| `destroy` | Exact container removal and optional Buildah/image/parent/Data cleanup | Definite pre-submission failure, or completed exact cleanup and independent absence checks; failure retains generation intent | Different BootID proves backend terminality; cleanup must still establish absence separately |
 | `injection` | Exact exec/read/write submission; one unfinished injection per generation | Trusted execution completion/native detached acceptance, with terminal transport | Different BootID; current container/PID observations do not reconstruct the old execution result |
 | Other `BeginBackend` kinds | Bounded exact host-side operation metadata; no current product callers | Consumer-supplied trusted terminal evidence | Same boot-epoch rule for v0 local work; no inferred kind-specific probe |
 
@@ -115,6 +115,11 @@ Backend recovery and storage recovery remain distinct actions and evidence check
 Normal destroy first resolves exact W+G to the immutable container ID and attempts
 `podman container rm --force -- <ID>` with a five-second bound. Success is followed
 by an independent exact absence check.
+
+A synchronous validation/discovery failure before the first removal submission
+releases that invocation's backend permit, but retains exact generation intent
+for a later destroy attempt. It does not establish ABSENT. After removal has
+been submitted, ambiguous errors retain both backend and generation ownership.
 
 Fallback requires expiration of that internal ordinary-removal bound while the
 outer request is still live, plus fresh attestation that the same container is at
