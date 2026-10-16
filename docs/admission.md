@@ -85,7 +85,8 @@ probe; real PID/cgroup/OCI validation remains external evidence.
 `BackendLedger` is reusable independently; service paths share one ledger for
 create/destroy, injection, and later `BeginBackend` consumers. Reservations are
 persisted before submission. `BeginBackend` returns the exact `BackendOperation`
-identity; host completion calls `RecoverBackend(operation, DefinitelyCompleted)`.
+identity, including its trusted kernel BootID; live host completion calls
+`RecoverBackend(operation, DefinitelyCompleted)`.
 It must also be used for definitely failed work or an unsubmitted reservation.
 The operation kind is bounded host metadata. Injection reservations must go
 through `Inject`, not `BeginBackend`.
@@ -99,7 +100,11 @@ attests a terminal failure only after its local command returns without
 cancellation or explicit uncertainty. Runtime Initialize/List are synchronous
 read-only probes and must leave no backend work alive on return.
 
-`PendingBackend` provides exact operation identities for recovery. Incorrect
+`PendingBackend` provides exact operation identities for recovery. The exclusive
+[operator recovery mode](recovery.md) gathers fresh kernel boot evidence and can
+release a selected prior-boot operation; current-boot and missing historical
+BootID remain fail-closed. Startup does not release permits. Reboot does not
+establish generation/residue absence. Incorrect
 W/G, ID or kind cannot release another operation's permit. Durable monotonic IDs
 prevent stale recovery from resolving a later operation, including after restart.
 Completed diagnostics are bounded metadata without workload output and consume

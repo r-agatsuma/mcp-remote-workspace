@@ -64,7 +64,8 @@ func (s *Service) observeCreate(ctx context.Context, e Exact) (Exact, string, er
 		return e, "PROCESSING", nil
 	case buildFailed:
 		// This observation never admits a replacement, even if cleanup succeeds.
-		return e, "", errors.Join(ErrBuildFailed, s.destroy(ctx, e))
+		diagnostic := s.buildDiagnostic(ctx, e)
+		return e, "", &buildFailure{exact: e, diagnostic: diagnostic, cause: s.destroy(ctx, e)}
 	default:
 		return e, "", ErrOutcomeUnknown
 	}
@@ -75,12 +76,12 @@ func (s *Service) buildCandidate(ctx context.Context, e Exact, dockerfile string
 	image, err := s.runtime.(BuildRuntime).Build(ctx, e, dockerfile, s.dataDir)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = control.Resolve(e, completionOf(err))
 	b := s.lifetimes[e].Build
 	// Ownership cannot be released while the worker or its backend is live.
 	if err == nil && !immutableImage(image) {
 		err = ErrOutcomeUnknown
 	}
+	_ = control.Resolve(e, completionOf(err))
 	if err == nil && s.candidateAuthority(e, buildBuilding) {
 		b.Phase, b.Image = buildFinalizing, image
 		if saveErr := s.commit(clone(s.entries)); saveErr != nil {
@@ -105,7 +106,7 @@ func (s *Service) buildCandidate(ctx context.Context, e Exact, dockerfile string
 	if err == nil && s.candidateAuthority(e, buildFinalizing) {
 		// Final authority recheck and durable publication share destroy's lock.
 		b.Phase = buildPresent
-	} else if completionOf(err) == DefinitelyCompleted && s.candidateAuthority(e, b.Phase) {
+	} else if ctx.Err() == nil && completionOf(err) == DefinitelyCompleted && s.candidateAuthority(e, b.Phase) {
 		b.Phase = buildFailed
 	} else {
 		b.Phase = buildRecovery

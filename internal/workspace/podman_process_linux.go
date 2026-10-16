@@ -21,6 +21,12 @@ var _ ProcessProbe = (*Podman)(nil)
 // ProbeProcess is read-only and synchronous. Errors attest that no injection
 // started, so the existing gate can release its reservation without recovery.
 func (p *Podman) ProbeProcess(ctx context.Context, e Exact) (snapshot ProcessSnapshot, err error) {
+	return p.probeProcess(ctx, e, false)
+}
+
+// Recovery uses the same identity, membership, inode and limit attestation as
+// injection. Only the full-ceiling admission refusal is permitted there.
+func (p *Podman) probeProcess(ctx context.Context, e Exact, pressure bool) (snapshot ProcessSnapshot, err error) {
 	defer func() {
 		if err != nil {
 			snapshot = ProcessSnapshot{}
@@ -152,6 +158,9 @@ func (p *Podman) ProbeProcess(ctx context.Context, e Exact) (snapshot ProcessSna
 		return snapshot, err
 	}
 	err = p.resourcePolicy().validateProcess(e, snapshot)
+	if pressure && errors.Is(err, ErrInjectionBusy) {
+		err = nil
+	}
 	return snapshot, err
 }
 

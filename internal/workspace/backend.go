@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"sort"
 	"sync"
 )
@@ -21,9 +22,10 @@ type BackendResult struct {
 
 // BackendOperation is bounded accounting metadata, never workload output.
 type BackendOperation struct {
-	ID    uint64
-	Exact Exact
-	Kind  string
+	ID     uint64
+	Exact  Exact
+	Kind   string
+	BootID string // trusted kernel epoch at admission; empty only for historical records
 }
 
 // BackendLedger accounts for live work independently of caller lifetime.
@@ -33,6 +35,7 @@ type BackendLedger struct {
 	mu                     sync.Mutex
 	limit, diagnosticLimit int
 	next                   uint64
+	bootID                 string
 	live                   map[uint64]BackendOperation
 	diagnostics            []BackendOperation
 }
@@ -46,7 +49,11 @@ func NewBackendLedger(limit, diagnostics int) (*BackendLedger, error) {
 	if limit <= 0 || diagnostics < 0 {
 		return nil, errors.New("invalid backend accounting limits")
 	}
-	return &BackendLedger{limit: limit, diagnosticLimit: diagnostics, live: make(map[uint64]BackendOperation)}, nil
+	bootID, err := kernelBootID()
+	if err != nil {
+		return nil, err
+	}
+	return &BackendLedger{limit: limit, diagnosticLimit: diagnostics, bootID: bootID, live: make(map[uint64]BackendOperation)}, nil
 }
 
 func (b *BackendLedger) Acquire(e Exact, kind string) (*BackendPermit, error) {
@@ -62,7 +69,7 @@ func (b *BackendLedger) Acquire(e Exact, kind string) (*BackendPermit, error) {
 		return nil, ErrBackendLimit
 	}
 	b.next++
-	op := BackendOperation{b.next, e, kind}
+	op := BackendOperation{ID: b.next, Exact: e, Kind: kind, BootID: b.bootID}
 	b.live[op.ID] = op
 	return &BackendPermit{b, op}, nil
 }
@@ -161,7 +168,7 @@ func (b *BackendLedger) restore(state BackendState, entries map[WorkspaceKey]Exa
 		return ErrBackendLimit
 	}
 	for _, op := range state.Operations {
-		if op.ID == 0 || op.ID > state.Next || op.Exact.validate() != nil || entries[op.Exact.Workspace] != op.Exact || op.Kind == "" || len(op.Kind) > 64 {
+		if op.ID == 0 || op.ID > state.Next || op.Exact.validate() != nil || entries[op.Exact.Workspace] != op.Exact || op.Kind == "" || len(op.Kind) > 64 || op.BootID != "" && !validBootID(op.BootID) {
 			return errors.New("invalid durable backend accounting")
 		}
 		if _, exists := b.live[op.ID]; exists {
@@ -200,6 +207,9 @@ func completionOf(err error) Completion {
 // Local CLI adapters attest terminal failure only after the synchronous command
 // has returned without caller cancellation or explicit uncertain completion.
 func localRuntimeError(ctx context.Context, err error) error {
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return errors.Join(ErrOutcomeUnknown, err)
+	}
 	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrOutcomeUnknown) {
 		return err
 	}
