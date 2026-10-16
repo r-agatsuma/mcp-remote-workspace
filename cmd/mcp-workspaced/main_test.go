@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"flag"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/r-agatsuma/mcp-remote-workspace/internal/workspace"
 )
 
 func TestSmokeMCP(t *testing.T) {
@@ -83,5 +88,43 @@ func TestSDKStreamableHTTP(t *testing.T) {
 				t.Fatalf("unexpected content: %+v", result.Content)
 			}
 		})
+	}
+}
+
+func TestPublicDNSDaemonFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args              []string
+		parseOK, configOK bool
+	}{
+		{nil, true, false},
+		{[]string{"-public-dns", "9.9.9.9"}, true, true},
+		{[]string{"-public-dns", "9.9.9.9", "-public-dns", "2606:4700:4700::1111"}, true, true},
+		{[]string{"-public-dns", "127.0.0.53"}, true, false},
+		{[]string{"-public-dns", "dns.example"}, true, false},
+		{[]string{"-public-dns", "9.9.9.9", "-public-dns", "8.8.4.4", "-public-dns", "1.0.0.1"}, true, true},
+		{[]string{"-public-dns", "9.9.9.9", "-public-dns", "8.8.4.4", "-public-dns", "1.0.0.1", "-public-dns", "1.1.1.1"}, false, false},
+	} {
+		flags := flag.NewFlagSet("test", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		var values []string
+		registerPublicDNS(flags, &values)
+		err := flags.Parse(tc.args)
+		if (err == nil) != tc.parseOK {
+			t.Fatal(tc.args, err)
+		}
+		if !tc.parseOK {
+			continue
+		}
+		var want []string
+		for i := 1; i < len(tc.args); i += 2 {
+			want = append(want, tc.args[i])
+		}
+		if !slices.Equal(values, want) {
+			t.Fatal("flag order changed", values)
+		}
+		cfg := workspace.Config{StateDir: "/state", PodmanPath: "/usr/bin/podman", Image: "example.invalid/image@sha256:" + strings.Repeat("a", 64), PublicDNS: values}
+		if (cfg.Validate() == nil) != tc.configOK {
+			t.Fatal("daemon resolver contract", tc.args)
+		}
 	}
 }

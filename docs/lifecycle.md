@@ -1,8 +1,8 @@
 # Workspace lifecycle
 
 `internal/workspace` contains the host-side lifecycle service and a narrow Podman
-CLI adapter. The existing MCP smoke server remains tool-free, with no product
-ingress or authentication transport. P4a adds reusable
+CLI adapter. The MCP smoke server remains tool-free; the production daemon
+exposes the five tools through [loopback ingress](ingress.md). P4a adds reusable
 TTL and resource/backend/storage admission on this substrate; see
 [the admission contract](admission.md) for current policy and recovery behavior.
 [Tools](tools.md) provide embedded lifecycle and exec/text registration using that gate.
@@ -11,8 +11,9 @@ TTL and resource/backend/storage admission on this substrate; see
 
 `IdentityFromTrustedMeta` must receive host-attested `_meta["openai/subject"]` and
 `_meta["openai/session"]`. Both must be nonempty strings. Unverified wire metadata
-must never be passed directly to this boundary; there is deliberately no listener
-or tool handler doing so. Caller workspace/user/session arguments and
+must never be passed directly to this boundary; the production ingress validates
+the trusted-host request before deriving identity. Caller workspace/user/session
+arguments and
 `Mcp-Session-Id` do not contribute to identity.
 
 W is a domain-separated SHA-256 hash of the length-prefixed subject/session pair.
@@ -87,12 +88,81 @@ mode. Production execution requires a non-root service account. Discovery uses
 JSON list/inspect output. Final-container create uses the canonical image or an
 exact candidate-built image ID, never pulls, does
 not mount host paths or engine sockets, disables implicit image volumes and uses
-no privileged/nested engine. This slice uses no network, drops container
-capabilities and enables no-new-privileges, and applies the configured P4a resource limits. Process injection remains a
-separate trusted runtime capability; see the admission contract.
+no privileged/nested engine. Both canonical and custom final containers use the
+same service-controlled runtime profile described below, drop container
+capabilities, enable no-new-privileges and apply the configured P4a resource limits.
+Process injection remains a separate trusted runtime capability; see the admission contract.
 Start/remove operate on full immutable container IDs resolved and validated for
 exact W/G; neither logical-key deletion nor bulk/prune operations exist. Output
 is bounded and commands honor context cancellation. No Podman/libpod SDK is used.
+
+## Trusted runtime and DNS profile
+
+Production configuration requires one to three `-public-dns <literal-IP>` options,
+in resolver preference order. There is no compiled resolver-address fallback.
+For example, deployment supplies its selected addresses as:
+
+```sh
+mcp-workspaced -daemon -mcp-listen 127.0.0.1:8080 \
+  -image "$CANONICAL_IMAGE" -public-dns "$PUBLIC_DNS_PRIMARY" \
+  -public-dns "$PUBLIC_DNS_SECONDARY"
+```
+
+The daemon passes these values through `workspace.Config.PublicDNS`. `Open`
+validates, normalizes and copies the list before runtime initialization; the
+Podman adapter keeps its own copy. Literal public IPs are required. Mapped IPv4
+is normalized to IPv4; scoped addresses, hostnames, loopback, private, CGNAT,
+link-local, ULA, documentation and reserved/special-use destinations are rejected.
+Configuration is deployment-owned, never a tool argument, metadata field,
+workspace environment or Dockerfile option. Public address classification does
+not replace deployment's denial of the host's own addresses.
+
+Final canonical and custom containers each select an independent rootless pasta
+namespace using this explicit profile:
+
+```text
+pasta:--no-map-gw,-t,none,-u,none,-T,none,-U,none
+```
+
+It disables automatic TCP/UDP forwarding in both directions and gateway mapping.
+No ports are published, no shared workspace network is selected, and no engine
+socket is passed. The build profile retains its separate exact-generation DHCP
+hostname token solely for Buildah residue attribution. Neither pasta profile
+is the destination enforcement boundary: root/operator-managed numeric-mcp-runner
+UID OUTPUT policy must enforce the accepted IPv4/IPv6 public-egress policy.
+The application installs no firewall rules and gains no host network privilege.
+
+Both final image paths ignore image volumes, disable healthchecks, host proxy
+injection and automatic exposed-port publication, and explicitly select private
+PID/IPC/UTS/cgroup namespaces. Image commands cannot trigger Podman's automatic
+systemd mount changes; image labels cannot select a seccomp profile. Ordinary
+image commands, guest environment and writable root filesystems remain usable.
+`--no-hosts` suppresses Podman's host-alias injection; guest `/etc/hosts` content
+cannot create a host route or override OUTPUT policy. No host devices, bind
+mounts, capabilities or security overrides can be supplied through tool input.
+
+At initialization the service creates bounded empty hook/default-mount
+configuration under `StateDir/runtime-profile` (private directories and a private
+empty file). Nonempty, symlinked or non-private entries fail startup. Both final
+paths explicitly select these locations, suppressing ambient OCI hooks and
+subscription/default mounts. These locations are never mounted into guests.
+Deployment must keep the remaining host Podman configuration trusted.
+
+The same configured resolver list reaches build RUN and final-container `--dns`
+arguments, with no inherited DNS search domains. Host-side image fetch is a
+separate context: it uses deployment's `/etc/resolv.conf`, not these `--dns`
+arguments. The existing host-resolver validation remains in the build path.
+Deployment must arrange the correct resolver view for the service/user-manager
+and Podman namespaces; #80 showed that an existing pause namespace can retain a
+stale stub-resolver view. This source change does not provision that view.
+Untrusted code may still query other public DNS/DoH endpoints. There is no DNS
+exclusivity rule, DNS proxy or prohibited-destination exception.
+
+These are source-level configuration and command-construction guarantees.
+Deployment reproduction belongs to #94; actual pasta connectivity, OUTPUT denial,
+resolver propagation and uncached fetch/package usability remain #95 evidence.
+#96 owns clean reconstruction and ChatGPT/Tunnel E2E. No real-host PASS follows
+from deterministic local tests.
 
 ## Dockerfile creation (P5)
 
@@ -143,7 +213,7 @@ outside it. The implementation expects the conventional
 closed if it cannot attest it. There is no unbounded or privileged fallback.
 
 Build RUN explicitly uses pasta, no gateway mapping and no port forwarding,
-with service defaults `1.1.1.1` and `8.8.8.8`. Host-side pulls require deployment
+with the trusted `Config.PublicDNS` resolver list. Host-side pulls require deployment
 `/etc/resolv.conf` to contain public-routable resolvers. The existing root-managed
 numeric-mcp-runner-UID OUTPUT boundary must already enforce prohibited destinations
 for both paths. This feature changes no firewall or deployment configuration.

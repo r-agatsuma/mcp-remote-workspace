@@ -43,6 +43,9 @@ func openControlled(t *testing.T, runtime Runtime, cfg Config) (*Service, Config
 	t.Helper()
 	dir := t.TempDir()
 	cfg.StateDir = filepath.Join(dir, "state")
+	if cfg.PublicDNS == nil {
+		cfg.PublicDNS = []string{"9.9.9.9"}
+	}
 	cfg.Image, cfg.PodmanPath = testImage, "/stub/podman"
 	if cfg.Storage == nil {
 		cfg.Storage = storageFunc(func(context.Context, string) (StorageSample, error) { return StorageSample{1 << 40, 1 << 30}, nil })

@@ -27,6 +27,8 @@ func main() {
 	podmanPath := flag.String("podman", "/usr/bin/podman", "absolute host-side rootless Podman executable")
 	dataDir := flag.String("data-dir", "", "absolute shared disposable Data pool path (default state-dir filesystem)")
 	toolTimeout := flag.Duration("tool-timeout", 30*time.Second, "positive exec/file control-plane lifetime")
+	var publicDNS []string
+	registerPublicDNS(flag.CommandLine, &publicDNS)
 	policy := workspace.ReferencePolicy()
 	flag.Int64Var(&policy.MemoryBytes, "memory-bytes", policy.MemoryBytes, "memory limit per resource-bearing generation")
 	flag.IntVar(&policy.MaxGenerations, "max-generations", policy.MaxGenerations, "maximum resource-bearing generations, including uncertain intent")
@@ -65,7 +67,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced: tool-timeout must be positive")
 			os.Exit(2)
 		}
-		if err := runDaemon(ctx, workspace.Config{StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}, *listen); err != nil {
+		if err := runDaemon(ctx, workspace.Config{PublicDNS: publicDNS, StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}, *listen); err != nil {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
 			os.Exit(1)
 		}
@@ -142,4 +144,14 @@ func smokeMCP(ctx context.Context) (protocol string, err error) {
 		return "", errors.New("skeleton must expose an empty tool list")
 	}
 	return info.ProtocolVersion, nil
+}
+
+func registerPublicDNS(flags *flag.FlagSet, values *[]string) {
+	flags.Func("public-dns", "required public resolver literal IP; repeat up to three times in preference order", func(value string) error {
+		if len(*values) >= workspace.MaxPublicDNS {
+			return errors.New("at most three public DNS addresses are allowed")
+		}
+		*values = append(*values, value)
+		return nil
+	})
 }

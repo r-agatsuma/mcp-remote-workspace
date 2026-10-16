@@ -29,6 +29,14 @@ Builds use the existing lifecycle, journal and admission controls, with rootless
 Podman/Buildah, pasta, a bounded systemd user slice and retained Data diagnostics.
 See [Dockerfile creation](docs/lifecycle.md#dockerfile-creation-p5) for behavior,
 host prerequisites and the separate canonical-host verification boundary.
+Production startup requires one to three explicit `-public-dns <literal-IP>`
+options; no resolver addresses are compiled defaults. Build RUN and both final
+image paths receive this deployment-owned list. Final workspaces select independent
+rootless pasta namespaces with forwarding and gateway mapping disabled, plus the
+same service-controlled image/runtime controls. See the
+[trusted runtime profile](docs/lifecycle.md#trusted-runtime-and-dns-profile).
+Host-fetch resolver configuration and root-managed OUTPUT policy remain deployment
+responsibilities; actual network/DNS effectiveness is deferred to #95.
 
 ## Go baseline
 

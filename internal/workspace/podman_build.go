@@ -84,7 +84,7 @@ func (p *Podman) buildArgs(e Exact, directory, parent string) []string {
 		"--memory-swap=" + strconv.FormatInt(policy.MemoryBytes+policy.SwapBytes, 10),
 		"--cpu-quota=" + strconv.FormatInt(policy.CPUQuota, 10),
 		"--ulimit=nofile=" + strconv.FormatUint(policy.NoFile, 10) + ":" + strconv.FormatUint(policy.NoFile, 10)}
-	for _, dns := range p.buildDNS {
+	for _, dns := range p.publicDNS {
 		args = append(args, "--dns="+dns)
 	}
 	labels := objectLabels(e, buildImageName(e))
@@ -95,7 +95,7 @@ func (p *Podman) buildArgs(e Exact, directory, parent string) []string {
 }
 
 func (p *Podman) Build(ctx context.Context, e Exact, text, dataDir string) (image string, err error) {
-	if !p.initialized || e.validate() != nil || !filepath.IsAbs(dataDir) || len(p.buildDNS) == 0 {
+	if !p.initialized || e.validate() != nil || !filepath.IsAbs(dataDir) || len(p.publicDNS) == 0 {
 		return "", CompletedBackendError(ErrNotReady)
 	}
 	cli, ok := p.runner.(localCLI)

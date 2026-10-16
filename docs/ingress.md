@@ -6,6 +6,11 @@ The only HTTP endpoint is `/mcp`. Empty configuration, hostnames, wildcard or
 non-loopback addresses, scoped addresses, malformed ports and port zero fail
 before Service initialization. There is no fallback or separate probe listener.
 The existing image, journal, Podman, resource and TTL flags still apply.
+One to three `-public-dns <literal-IP>` options are also required; values are
+validated and copied at service startup. This trusted deployment configuration
+reaches build RUN and final workspace defaults, never request identity or tool
+arguments. See the [runtime profile](lifecycle.md#trusted-runtime-and-dns-profile)
+for host-fetch DNS separation and the required external enforcement boundary.
 
 The daemon acquires the existing singleton through `workspace.Open`, initializes
 the runtime and reconciles the journal before binding the socket. The same
@@ -115,5 +120,6 @@ contention, closed admission and replacement fencing for all three exec/file API
 
 Independent source review is required separately. No real Podman, systemd,
 Secure MCP Tunnel, ChatGPT, OCI or remote integration verification is performed
-by these tests. #92 runtime/network/DNS, #93 recovery, #94 deployment, #95 dirty-OCI
-integration (I1), and #96 clean reconstruction/ChatGPT/Tunnel E2E (I2) remain deferred.
+by these tests. #92 supplies the source runtime/network/DNS profile; #93 recovery,
+#94 deployment, #95 dirty-OCI integration (I1), and #96 clean
+reconstruction/ChatGPT/Tunnel E2E (I2) remain deferred.
