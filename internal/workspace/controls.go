@@ -155,9 +155,15 @@ func (s *Service) RecoverStorage(ctx context.Context) error {
 	if !s.ready {
 		return ErrNotReady
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	sample, err := s.storage.Sample(ctx, s.dataDir)
 	if err != nil || sample.AvailableBytes < s.policy.MinAvailableBytes || sample.FreeInodes < s.policy.MinFreeInodes {
 		return errors.Join(ErrStorageRecovery, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	s.storageBlocked = false
 	return s.commit(clone(s.entries))
@@ -224,6 +230,10 @@ func (s *Service) PendingBackend() []BackendOperation { return s.backend.Pending
 func (s *Service) RecoverBackend(op BackendOperation, completion Completion) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.recoverBackend(op, completion)
+}
+
+func (s *Service) recoverBackend(op BackendOperation, completion Completion) error {
 	if !s.ready {
 		return ErrNotReady
 	}

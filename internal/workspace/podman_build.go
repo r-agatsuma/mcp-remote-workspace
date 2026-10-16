@@ -135,12 +135,25 @@ func (p *Podman) Build(ctx context.Context, e Exact, text, dataDir string) (imag
 	if err := os.WriteFile(filepath.Join(directory, "mounts.conf"), nil, 0600); err != nil {
 		return "", CompletedBackendError(err)
 	}
-	f, err := os.OpenFile(filepath.Join(directory, "diagnostics"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(filepath.Join(directory, "stdout.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return "", CompletedBackendError(err)
 	}
-	log := &buildLog{file: f}
-	defer func() { err = errors.Join(err, CompletedBackendError(f.Close())) }()
+	stderrFile, err := os.OpenFile(filepath.Join(directory, "stderr.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		f.Close()
+		return "", CompletedBackendError(err)
+	}
+	stdout, stderr := &buildLog{file: f}, &buildLog{file: stderrFile}
+	var exitStatus *int
+	defer func() {
+		// Run has joined both drains on every path. Sync failures prevent
+		// publication but never interrupt consumption of the other stream.
+		logErr := finishBuildLogs(directory, e, stdout, stderr, exitStatus)
+		if logErr != nil {
+			err = errors.Join(err, CompletedBackendError(errors.New("build diagnostic storage failed")))
+		}
+	}()
 	parent, err := p.startBuildParent(ctx, e)
 	// An attempted parent creation can have partially succeeded. Regardless of
 	// caller cancellation, use bounded trusted control outside the parent to stop
@@ -148,6 +161,9 @@ func (p *Podman) Build(ctx context.Context, e Exact, text, dataDir string) (imag
 	defer func() {
 		control, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		if ctx.Err() != nil {
+			err = errors.Join(ErrOutcomeUnknown, err, ctx.Err())
+		}
 		if stopErr := p.stopBuildParent(control, e); stopErr != nil {
 			err = errors.Join(ErrOutcomeUnknown, stopErr, err)
 		} else if err != nil {
@@ -160,8 +176,15 @@ func (p *Podman) Build(ctx context.Context, e Exact, text, dataDir string) (imag
 	run := func(unit string, args ...string) error {
 		args = append([]string{"--remote=false", "--cgroup-manager=systemd", "--tmpdir=" + filepath.Join(directory, "tmp")}, args...)
 		command := buildUnitCommand(ctx, e, unit, directory, p.resourcePolicy(), cli.path, args...)
-		command.Stdout, command.Stderr = log, log
-		return command.Run() // joins both continuous bounded pipe drains
+		command.Stdout, command.Stderr = stdout, stderr
+		err := command.Run() // joins both continuous bounded pipe drains
+		if command.ProcessState != nil {
+			code := command.ProcessState.ExitCode()
+			if code >= 0 {
+				exitStatus = &code
+			}
+		}
+		return buildCommandError(ctx, err)
 	}
 	for index, source := range sources {
 		_, existsErr := p.runner.run(ctx, "image", "exists", "--", source)
@@ -184,7 +207,7 @@ func (p *Podman) Build(ctx context.Context, e Exact, text, dataDir string) (imag
 	if err := run("build", args...); err != nil {
 		return "", err
 	}
-	if log.err != nil || f.Sync() != nil {
+	if stdout.err != nil || stderr.err != nil {
 		return "", errors.New("build diagnostics drain failed")
 	}
 	id, err := os.ReadFile(filepath.Join(directory, "image-id"))

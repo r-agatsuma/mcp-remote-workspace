@@ -155,3 +155,15 @@ uncertain lifecycle work remains fail-closed. The subsequent existing `Inject`
 rechecks the same W+G, so replacement after lookup rejects the old operation
 rather than selecting the new generation. Create/destroy retain Service-owned
 generation selection. This adds no public identity or generation parameter.
+
+## Failed Dockerfile observation
+
+The existing `workspace_create` error result may carry a `build_diagnostic`
+object with separate `stdout` / `stderr` stream results (at most 64 KiB each),
+optional `exit_status`, and `available`. It is prepared only for the exact known
+terminal failed candidate. Cleanup uncertainty can accompany that diagnostic
+with `outcome_unknown: true`; a replacement is still forbidden. The observation
+call ignores supplied replacement text. Only a later create after confirmed
+ABSENT allocates fresh G. Unknown build completion returns outcome-unknown,
+without claiming terminal build failure. See [trusted recovery](recovery.md)
+for retention, cleanup and operator-only backend/storage recovery.

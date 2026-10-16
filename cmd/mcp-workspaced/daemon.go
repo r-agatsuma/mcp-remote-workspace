@@ -13,14 +13,7 @@ import (
 
 // runDaemon owns the single lifecycle Service and its loopback ingress.
 func runDaemon(ctx context.Context, cfg workspace.Config, endpoint string) error {
-	cfg.PublicDNS = append([]string(nil), cfg.PublicDNS...)
-	return runDaemonWithRuntime(ctx, cfg, endpoint, func() workspace.Runtime {
-		policy := workspace.ReferencePolicy()
-		if cfg.Policy != nil {
-			policy = *cfg.Policy
-		}
-		return workspace.NewPodmanWithPolicy(cfg.PodmanPath, cfg.Image, policy, cfg.PublicDNS...)
-	})
+	return runDaemonWithRuntime(ctx, cfg, endpoint, runtimeFactory(cfg))
 }
 
 func runDaemonWithRuntime(ctx context.Context, cfg workspace.Config, endpoint string, factory func() workspace.Runtime) (err error) {

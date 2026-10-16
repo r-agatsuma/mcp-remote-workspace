@@ -93,7 +93,9 @@ same service-controlled runtime profile described below, drop container
 capabilities, enable no-new-privileges and apply the configured P4a resource limits.
 Process injection remains a separate trusted runtime capability; see the admission contract.
 Start/remove operate on full immutable container IDs resolved and validated for
-exact W/G; neither logical-key deletion nor bulk/prune operations exist. Output
+exact W/G; neither logical-key deletion nor bulk/prune operations exist. Bounded
+ordinary removal has an exact user-scope fallback only after fresh PID-pressure
+and ownership attestation; see [trusted recovery](recovery.md). Output
 is bounded and commands honor context cancellation. No Podman/libpod SDK is used.
 
 ## Trusted runtime and DNS profile
@@ -223,8 +225,11 @@ volumes/healthchecks and use empty service-owned hook configuration.
 
 Engine GraphRoot must be on the configured Data filesystem. Context, TMPDIR,
 authfile, image-ID file and logs live under `DataDir/builds/mcpws-v1-W-G`.
-Both output streams continuously drain bounded OS pipes to a combined 1 MiB
-diagnostic prefix, discarding excess even after write failure. Drain/write failure
+Both output streams continuously drain bounded OS pipes to separate 512 KiB
+stdout/stderr diagnostic prefixes (1 MiB total), discarding excess even after
+write failure. The next permitted failed-create observation returns at most
+64 KiB per stream before exact cleanup; that call cannot install replacement
+Dockerfile text. Drain/write failure
 prevents publication. Final and intermediate images carry exact ownership labels;
 deletion uses independently inspected immutable IDs and `--no-prune`.
 Buildah external-storage residue is attributed by its saved exact pasta network

@@ -65,9 +65,11 @@ type Podman struct {
 	initialized bool
 	policy      *Policy
 	// Host-owned read-only proc/cgroup roots. Nil selects verified Linux mounts.
-	processRoots func() (*os.Root, *os.Root, error)
-	publicDNS    []string // service/deployment-owned public resolver defaults
-	profileDir   string   // private service-owned empty hooks/default-mount configuration
+	processRoots  func() (*os.Root, *os.Root, error)
+	publicDNS     []string                                                 // service/deployment-owned public resolver defaults
+	profileDir    string                                                   // private service-owned empty hooks/default-mount configuration
+	hostRunner    func(context.Context, string, ...string) ([]byte, error) // private command fixture
+	removeTimeout time.Duration                                            // private test seam; zero selects the bounded ordinary removal lifetime
 }
 
 func NewPodman(path, image string, publicDNS ...string) *Podman {
@@ -297,7 +299,19 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) (err error) 
 }
 
 func (p *Podman) Destroy(ctx context.Context, e Exact) (err error) {
-	defer func() { err = localRuntimeError(ctx, err) }()
+	// Synchronous preflight failures leave no destructive backend work alive.
+	// Once removal is submitted, ambiguity must retain backend authority as well
+	// as generation intent. Neither classification by itself proves absence.
+	submitted := false
+	defer func() {
+		if err != nil {
+			if !submitted {
+				err = CompletedBackendError(err)
+			} else {
+				err = errors.Join(ErrOutcomeUnknown, err)
+			}
+		}
+	}()
 	if err := e.validate(); err != nil {
 		return err
 	}
@@ -305,17 +319,71 @@ func (p *Podman) Destroy(ctx context.Context, e Exact) (err error) {
 	if err != nil {
 		return err
 	}
+	var target string
 	for _, o := range objects {
 		actual, _, err := classify(o)
 		if err != nil {
 			return err
 		}
 		if actual == e {
-			// Full immutable ID was resolved from exact W/G ownership. Name
-			// reuse cannot redirect this command to a later generation.
-			_, err := p.runner.run(ctx, "container", "rm", "--force", "--", o.ID)
-			return err
+			if target != "" {
+				return ErrProcessUnsafe
+			}
+			target = o.ID
 		}
 	}
-	return nil
+	if target == "" {
+		return ctx.Err()
+	}
+	lifetime := p.removeTimeout
+	if lifetime == 0 {
+		lifetime = 5 * time.Second
+	}
+	ordinary, cancel := context.WithTimeout(ctx, lifetime)
+	submitted = true
+	_, removeErr := p.runner.run(ordinary, "container", "rm", "--force", "--", target)
+	timedOut := ordinary.Err() == context.DeadlineExceeded
+	cancel()
+	if timedOut {
+		removeErr = errors.Join(removeErr, context.DeadlineExceeded)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if removeErr != nil {
+		// Only our bounded stop deadline plus newly attested PID saturation
+		// permits fallback. Caller cancellation/deadlines and arbitrary runtime
+		// errors cannot create kill authority.
+		if !timedOut {
+			return removeErr
+		}
+		if err := p.recoverPressureScope(ctx, e, target); err != nil {
+			return err
+		}
+		retry, cancel := context.WithTimeout(ctx, lifetime)
+		_, err = p.runner.run(retry, "container", "rm", "--force", "--", target)
+		ended := retry.Err()
+		cancel()
+		if err != nil || ended != nil {
+			return errors.Join(err, ended)
+		}
+	}
+	objects, err = p.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, o := range objects {
+		actual, _, err := classify(o)
+		if err != nil || actual == e || o.ID == target {
+			return ErrOutcomeUnknown
+		}
+	}
+	return ctx.Err()
+}
+
+func (p *Podman) host(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	if p.hostRunner != nil {
+		return p.hostRunner(ctx, executable, args...)
+	}
+	return runHostCommand(ctx, executable, args...)
 }

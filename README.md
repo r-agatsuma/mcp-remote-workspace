@@ -29,6 +29,12 @@ Builds use the existing lifecycle, journal and admission controls, with rootless
 Podman/Buildah, pasta, a bounded systemd user slice and retained Data diagnostics.
 See [Dockerfile creation](docs/lifecycle.md#dockerfile-creation-p5) for behavior,
 host prerequisites and the separate canonical-host verification boundary.
+Trusted operators can use exclusive `-recover inspect|backend|storage|cleanup`
+mode with the normal singleton and durable state. Backend recovery requires
+product-gathered evidence that the recorded kernel BootID differs from the
+current boot; residue still requires exact cleanup. See [trusted recovery](docs/recovery.md)
+for the terminal-evidence map, storage latch, pressure fallback and bounded
+stdout/stderr failure observations.
 Production startup requires one to three explicit `-public-dns <literal-IP>`
 options; no resolver addresses are compiled defaults. Build RUN and both final
 image paths receive this deployment-owned list. Final workspaces select independent

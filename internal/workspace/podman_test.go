@@ -199,7 +199,8 @@ func TestPodmanDestroyCannotRemoveLaterGeneration(t *testing.T) {
 	g1, g2 := Exact{w, Generation(strings.Repeat("b", 64))}, Exact{w, Generation(strings.Repeat("c", 64))}
 	o1, o2 := fakeObject(g1), fakeObject(g2)
 	p, _ := podmanStub(t, infoStep(), listStep(listJSON(t, o1, o2)), inspectStep(t, o1), inspectStep(t, o2),
-		commandStep{args: []string{"container", "rm", "--force", "--", o1.ID}})
+		commandStep{args: []string{"container", "rm", "--force", "--", o1.ID}},
+		listStep(listJSON(t, o2)), inspectStep(t, o2)) // independently confirm G1 absence; G2 remains
 	if err := p.Initialize(context.Background()); err != nil {
 		t.Fatal(err)
 	}

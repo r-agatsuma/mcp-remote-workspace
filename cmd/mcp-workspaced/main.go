@@ -21,6 +21,8 @@ const serverVersion = "0.0.0-dev"
 func main() {
 	smoke := flag.Bool("smoke", false, "check an in-memory MCP connection and exit (5-second deadline)")
 	daemon := flag.Bool("daemon", false, "serve loopback MCP with reconciled lifecycle state until shutdown")
+	recovery := flag.String("recover", "", "exclusive trusted recovery: inspect, backend, storage or cleanup")
+	selection := flag.String("recovery-selection", "", "exact opaque selection from -recover inspect")
 	listen := flag.String("mcp-listen", "", "required literal loopback IP:port for -daemon; MCP path /mcp")
 	stateDir := flag.String("state-dir", "", "private absolute lifecycle journal directory")
 	image := flag.String("image", "", "canonical locally installed image pinned with @sha256:digest")
@@ -48,11 +50,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "mcp-workspaced: unexpected positional arguments")
 		os.Exit(2)
 	}
-	if *daemon && *smoke {
-		fmt.Fprintln(os.Stderr, "mcp-workspaced: choose -daemon or -smoke")
+	if err := validateModes(*daemon, *smoke, *recovery, *selection, *listen); err != nil {
+		fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
 		os.Exit(2)
 	}
-	if *daemon {
+	if *daemon || *recovery != "" {
 		if *stateDir == "" {
 			var err error
 			*stateDir, err = workspace.DefaultStateDir()
@@ -67,7 +69,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced: tool-timeout must be positive")
 			os.Exit(2)
 		}
-		if err := runDaemon(ctx, workspace.Config{PublicDNS: publicDNS, StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}, *listen); err != nil {
+		cfg := workspace.Config{PublicDNS: publicDNS, StateDir: *stateDir, Image: *image, PodmanPath: *podmanPath, DataDir: *dataDir, Policy: &policy, ToolTimeout: *toolTimeout}
+		var err error
+		if *recovery != "" {
+			err = runRecovery(ctx, cfg, *recovery, *selection, os.Stdout)
+		} else {
+			err = runDaemon(ctx, cfg, *listen)
+		}
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "mcp-workspaced:", err)
 			os.Exit(1)
 		}

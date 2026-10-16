@@ -959,11 +959,16 @@ func TestAdmissionJournalRejectsCorruptAuthorityBeforeRuntime(t *testing.T) {
 		{"duplicate-lifetime", func(j *journal) { j.Lifetimes = append(j.Lifetimes, j.Lifetimes[0]) }},
 		{"future-activity", func(j *journal) { j.Lifetimes[0].Activity = now.Add(time.Minute) }},
 		{"missing-counter", func(j *journal) { j.Backend.Next = 0 }},
-		{"stale-backend", func(j *journal) { j.Backend.Operations = []BackendOperation{{1, other, "create"}} }},
-		{"duplicate-operation", func(j *journal) { j.Backend.Operations = []BackendOperation{{1, e, "build"}, {1, e, "build"}} }},
+		{"malformed-boot", func(j *journal) {
+			j.Backend.Operations = []BackendOperation{{ID: 1, Exact: e, Kind: "create", BootID: "not-a-kernel-epoch"}}
+		}},
+		{"stale-backend", func(j *journal) { j.Backend.Operations = []BackendOperation{{ID: 1, Exact: other, Kind: "create"}} }},
+		{"duplicate-operation", func(j *journal) {
+			j.Backend.Operations = []BackendOperation{{ID: 1, Exact: e, Kind: "build"}, {ID: 1, Exact: e, Kind: "build"}}
+		}},
 		{"duplicate-injection", func(j *journal) {
 			j.Backend.Next = 2
-			j.Backend.Operations = []BackendOperation{{1, e, "injection"}, {2, e, "injection"}}
+			j.Backend.Operations = []BackendOperation{{ID: 1, Exact: e, Kind: "injection"}, {ID: 2, Exact: e, Kind: "injection"}}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

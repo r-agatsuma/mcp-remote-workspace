@@ -55,13 +55,15 @@ type WriteTextResult struct {
 	Status string `json:"status"`
 }
 
-// ToolError contains only fixed, bounded messages. Runtime diagnostics, paths,
-// argv, contents and underlying error strings never reach model-facing errors.
+// ToolError messages are fixed and bounded; underlying error strings and argv
+// are never serialized. BuildDiagnostic is the explicit bounded, exact-generation
+// output exception, with service paths redacted before reaching this type.
 type ToolError struct {
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	OutcomeUnknown bool   `json:"outcome_unknown,omitempty"`
-	cause          error
+	Code            string           `json:"code"`
+	Message         string           `json:"message"`
+	OutcomeUnknown  bool             `json:"outcome_unknown,omitempty"`
+	BuildDiagnostic *BuildDiagnostic `json:"build_diagnostic,omitempty"`
+	cause           error
 }
 
 func (e *ToolError) Error() string { return e.Code + ": " + e.Message }
@@ -86,6 +88,11 @@ func boundedToolCause(err error) error {
 func mapToolError(err error) error {
 	if err == nil {
 		return nil
+	}
+	var failure *buildFailure
+	if errors.As(err, &failure) {
+		return &ToolError{Code: "build_failed", Message: "Workspace build or finalization failed. Replacement requires confirmed exact cleanup and a later create.",
+			OutcomeUnknown: errors.Is(err, ErrOutcomeUnknown), BuildDiagnostic: &failure.diagnostic, cause: boundedToolCause(err)}
 	}
 	if errors.Is(err, ErrOutcomeUnknown) {
 		return &ToolError{Code: "outcome_unknown", Message: "Completion is unknown; side effects may have begun. Do not replay automatically.", OutcomeUnknown: true, cause: boundedToolCause(err)}

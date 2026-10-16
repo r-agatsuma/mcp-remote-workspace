@@ -84,6 +84,7 @@ type Service struct {
 	toolTimeout    time.Duration
 	workers        map[Exact]context.CancelFunc
 	workerDone     sync.WaitGroup
+	bootID         func() (string, error) // private test seam; production reads kernel procfs
 }
 
 // Open obtains the account-wide singleton before constructing or discovering
@@ -154,7 +155,7 @@ func open(ctx context.Context, cfg Config, factory func() Runtime, lockPath stri
 		return nil, err
 	}
 	s := &Service{runtime: factory(), image: cfg.Image, path: filepath.Join(cfg.StateDir, "journal.json"), lock: lock, save: writeAdmissionJournal,
-		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout, workers: make(map[Exact]context.CancelFunc)}
+		policy: policy, dataDir: cfg.DataDir, storage: cfg.Storage, now: cfg.Clock, backend: backend, injections: make(map[Exact]*BackendPermit), toolTimeout: cfg.ToolTimeout, workers: make(map[Exact]context.CancelFunc), bootID: kernelBootID}
 	if s.runtime == nil {
 		return nil, errors.New("runtime is required")
 	}
