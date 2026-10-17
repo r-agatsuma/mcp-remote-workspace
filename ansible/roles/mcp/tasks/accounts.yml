@@ -1,0 +1,76 @@
+---
+- name: Inspect existing account identities
+  ansible.builtin.getent:
+    database: passwd
+- name: Refuse changing existing service UIDs
+  ansible.builtin.assert:
+    that: item.name not in ansible_facts.getent_passwd or ansible_facts.getent_passwd[item.name][1] | int == item.uid | int
+  loop:
+    - {name: mcp-runner, uid: '{{ mcp_runner_uid }}'}
+    - {name: mcp-tunnel, uid: '{{ mcp_tunnel_uid }}'}
+- name: Inspect existing group identities
+  ansible.builtin.getent:
+    database: group
+- name: Refuse changing existing service GIDs
+  ansible.builtin.assert:
+    that: item.name not in ansible_facts.getent_group or ansible_facts.getent_group[item.name][1] | int == item.gid | int
+  loop:
+    - {name: mcp-runner, gid: '{{ mcp_runner_gid }}'}
+    - {name: mcp-tunnel, gid: '{{ mcp_tunnel_gid }}'}
+- name: Create distinct service groups
+  ansible.builtin.group:
+    name: '{{ item.name }}'
+    gid: '{{ item.gid }}'
+    system: true
+  loop:
+    - {name: mcp-runner, gid: '{{ mcp_runner_gid }}'}
+    - {name: mcp-tunnel, gid: '{{ mcp_tunnel_gid }}'}
+- name: Create non-login unprivileged service accounts without automatic subid allocation
+  ansible.builtin.user:
+    name: '{{ item.name }}'
+    uid: '{{ item.uid }}'
+    group: '{{ item.name }}'
+    groups: ''
+    append: false
+    home: '{{ item.home }}'
+    create_home: false
+    shell: /usr/sbin/nologin
+    password_lock: true
+    system: true
+  loop:
+    - {name: mcp-runner, uid: '{{ mcp_runner_uid }}', home: /srv/mcp-podman/runner/home}
+    - {name: mcp-tunnel, uid: '{{ mcp_tunnel_uid }}', home: /var/lib/mcp-tunnel}
+- name: Check subid allocation for overlap before assigning
+  ansible.builtin.script:
+    cmd: 'check-subids.py {{ mcp_subid_start }} {{ mcp_runner_uid }} {{ mcp_runner_gid }} {{ mcp_tunnel_uid }} {{ mcp_tunnel_gid }}'
+    executable: /usr/bin/python3
+  changed_when: false
+- name: Assign exact subordinate UID and GID ranges
+  ansible.builtin.lineinfile:
+    path: '{{ item }}'
+    regexp: '^mcp-runner:'
+    line: 'mcp-runner:{{ mcp_subid_start }}:65536'
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [/etc/subuid, /etc/subgid]
+- name: Create private account state and Data paths
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ item.owner }}'
+    group: '{{ item.owner }}'
+    mode: '{{ item.mode | default("0700") }}'
+  loop:
+    - {path: /srv/mcp-podman/runner, owner: root, mode: '0711'}
+    - {path: /srv/mcp-podman/runner/home, owner: mcp-runner}
+    - {path: /srv/mcp-podman/runner/config, owner: root, mode: '0755'}
+    - {path: /srv/mcp-podman/runner/config/containers, owner: root, mode: '0755'}
+    - {path: /srv/mcp-podman/runner/storage, owner: mcp-runner}
+    - {path: /srv/mcp-podman/runner/data, owner: mcp-runner}
+    - {path: /srv/mcp-podman/runner/tmp, owner: mcp-runner}
+    - {path: /srv/mcp-podman/runner/cache, owner: mcp-runner}
+    - {path: /srv/mcp-podman/runner/events, owner: mcp-runner}
+    - {path: /var/lib/mcp-workspaced, owner: mcp-runner}
+    - {path: /var/lib/mcp-tunnel, owner: mcp-tunnel}

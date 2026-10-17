@@ -1,0 +1,90 @@
+---
+- name: Create root-controlled Tunnel configuration boundary
+  ansible.builtin.file:
+    path: /etc/mcp-tunnel
+    state: directory
+    owner: root
+    group: mcp-tunnel
+    mode: '0750'
+- name: Create pinned client extraction directory
+  ansible.builtin.file:
+    path: /opt/mcp-tunnel-v0.0.15
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+- name: Download official pinned AArch64 client with explicit verified checksum
+  ansible.builtin.get_url:
+    url: https://github.com/openai/tunnel-client/releases/download/v0.0.15/tunnel-client-v0.0.15-linux-arm64.zip
+    dest: /opt/mcp-tunnel-v0.0.15/release.zip
+    checksum: 'sha256:{{ mcp_tunnel_sha256 }}'
+    owner: root
+    group: root
+    mode: '0644'
+- name: Extract pinned release (never execute bundled Cloudflared)
+  ansible.builtin.unarchive:
+    src: /opt/mcp-tunnel-v0.0.15/release.zip
+    dest: /opt/mcp-tunnel-v0.0.15
+    remote_src: true
+    creates: /opt/mcp-tunnel-v0.0.15/tunnel-client
+- name: Install exact root-owned Tunnel binary
+  ansible.builtin.copy:
+    src: /opt/mcp-tunnel-v0.0.15/tunnel-client
+    dest: /usr/local/libexec/tunnel-client
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+  notify: Restart tunnel
+- name: Inspect pinned client version without connecting
+  ansible.builtin.command: /usr/local/libexec/tunnel-client --version
+  register: mcp_tunnel_identity
+  changed_when: false
+- name: Require exact official release source identity
+  ansible.builtin.assert:
+    that: "('0.0.15+' + mcp_tunnel_source) in mcp_tunnel_identity.stdout"
+- name: Record Tunnel artifact provenance
+  ansible.builtin.copy:
+    content: |
+      release=v0.0.15
+      source={{ mcp_tunnel_source }}
+      archive_sha256={{ mcp_tunnel_sha256 }}
+      upstream=https://github.com/openai/tunnel-client/releases/tag/v0.0.15
+    dest: /etc/mcp-deployment/tunnel-provenance.txt
+    owner: root
+    group: root
+    mode: '0644'
+- name: Install deterministic supported v0.0.15 profile
+  ansible.builtin.template:
+    src: tunnel-profile.yml.j2
+    dest: /etc/mcp-tunnel/profile.yml
+    owner: root
+    group: mcp-tunnel
+    mode: '0640'
+  notify: Restart tunnel
+- name: Provision runtime credential only if absent (no routine rotation)
+  ansible.builtin.copy:
+    src: '{{ mcp_tunnel_environment_file }}'
+    dest: /etc/mcp-tunnel/runtime.env
+    owner: mcp-tunnel
+    group: mcp-tunnel
+    mode: '0600'
+    force: false
+  no_log: true
+  diff: false
+- name: Enforce credential boundary without reading or displaying contents
+  ansible.builtin.file:
+    path: /etc/mcp-tunnel/runtime.env
+    owner: mcp-tunnel
+    group: mcp-tunnel
+    mode: '0600'
+  no_log: true
+  diff: false
+- name: Install production Tunnel unit
+  ansible.builtin.template:
+    src: mcp-tunnel.service.j2
+    dest: /etc/systemd/system/mcp-tunnel.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart tunnel

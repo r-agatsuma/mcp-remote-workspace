@@ -1,0 +1,39 @@
+---
+# LOCAL ONLY. Renders synthetic fixtures; never imports deployment tasks.
+- name: Render representative source fixtures with the real Ansible templater
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - ../roles/mcp/defaults/main.yml
+    - ../roles/mcp/vars/main.yml
+  vars:
+    mcp_fixture_baseline: |
+      *filter
+      :INPUT DROP [0:0]
+      :FORWARD DROP [0:0]
+      :OUTPUT ACCEPT [0:0]
+      -A INPUT -i lo -j ACCEPT
+      COMMIT
+  tasks:
+    - name: Require an explicitly selected temporary output directory
+      ansible.builtin.assert:
+        that:
+          - mcp_render_dir is match('^/tmp/mcp-')
+          - mcp_source_revision is match('^[0-9a-f]{40}$')
+    - name: Render each production template without installing it
+      ansible.builtin.template:
+        src: '{{ item }}'
+        dest: '{{ mcp_render_dir }}/{{ item | basename | regex_replace("\.j2$", "") }}'
+        mode: '0600'
+      loop: '{{ query("fileglob", "../roles/mcp/templates/*.j2") }}'
+    - name: Exercise the production custom firewall filter
+      ansible.builtin.copy:
+        content: >-
+          {{ mcp_fixture_baseline |
+          mcp_firewall(item, mcp_runner_uid, [], vars['mcp_nonpublic_v' + (item | string)],
+          vars['mcp_public_protocol_v' + (item | string)]) }}
+        dest: '{{ mcp_render_dir }}/rules.v{{ item }}'
+        mode: '0600'
+      loop: [4, 6]

@@ -1,0 +1,48 @@
+---
+- name: Read live filter table without counters
+  ansible.builtin.command:
+    argv: ['/usr/sbin/{{ firewall.frontend }}-save', -t, filter]
+  register: mcp_live_rules
+  changed_when: false
+- name: Refuse unrepresented non-filter live tables on the dedicated host
+  ansible.builtin.command:
+    argv: ['/usr/sbin/{{ firewall.frontend }}-save']
+  register: mcp_all_tables
+  changed_when: false
+  failed_when: >-
+    (mcp_all_tables.stdout_lines | select('match', '^\\*') | list | difference(['*filter'])) | length != 0
+- name: Inspect existing persistent file before adoption
+  ansible.builtin.stat:
+    path: '/etc/iptables/rules.v{{ firewall.family }}'
+  register: mcp_persistent_file
+- name: Read existing persistent policy
+  ansible.builtin.slurp:
+    src: '/etc/iptables/rules.v{{ firewall.family }}'
+  register: mcp_existing_policy
+  when: mcp_persistent_file.stat.exists
+- name: Refuse overwriting non-filter persistent policy during first adoption
+  ansible.builtin.assert:
+    that: >-
+      ((mcp_existing_policy.content | b64decode).splitlines() |
+      select('match', '^\\*') | list | difference(['*filter'])) | length == 0
+  when: mcp_persistent_file.stat.exists and not mcp_firewall_owned.stat.exists
+- name: Read previous deployment-owned table
+  ansible.builtin.slurp:
+    src: '/etc/iptables/rules.v{{ firewall.family }}'
+  register: mcp_previous_rules
+  when: mcp_firewall_owned.stat.exists
+- name: Refuse unreviewed firewall drift or adoption
+  ansible.builtin.assert:
+    that:
+      - >-
+        (mcp_live_rules.stdout | mcp_rules_normalize) ==
+        ((mcp_previous_rules.content | b64decode) | mcp_rules_normalize)
+        if mcp_firewall_owned.stat.exists else
+        (mcp_live_rules.stdout | mcp_rules_normalize) ==
+        (lookup('file', firewall.baseline) | mcp_rules_normalize)
+    fail_msg: Live firewall differs from reviewed baseline or last owned policy. Stop for operator review; no reset.
+- name: Syntax-test candidate without loading rules
+  ansible.builtin.command:
+    argv: ['/usr/sbin/{{ firewall.frontend }}-restore', --test]
+    stdin: '{{ firewall.rendered }}'
+  changed_when: false

@@ -44,6 +44,14 @@ same service-controlled image/runtime controls. See the
 Host-fetch resolver configuration and root-managed OUTPUT policy remain deployment
 responsibilities; actual network/DNS effectiveness is deferred to #95.
 
+## Deployment source
+
+[Canonical v0 deployment and operations](docs/deployment.md) describes the
+repository-owned Ansible/systemd tree, exact-source provenance, separated
+credentials, Data bootstrap safety, trusted DNS/firewall and exclusive recovery.
+See `ansible/inventory/example` for required inputs. These are source/static
+checks only: OCI convergence and real runtime/Tunnel behavior remain #95/#96.
+
 ## Go baseline
 
 `go.mod` records Go language/module minimum **1.26.8** (required by the pinned Dockerfile parser)

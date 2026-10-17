@@ -1,0 +1,21 @@
+#!/bin/sh
+# Unprivileged launch adapter, NOT another recovery implementation.
+set -eu
+case "${1-}" in
+  -daemon|-recover) ;;
+  *) echo 'Use -daemon or the documented -recover CLI' >&2; exit 2 ;;
+esac
+/usr/local/libexec/mcp-data-check {{ mcp_data_uuid | quote }} \
+  /srv/mcp-podman/runner/home /srv/mcp-podman/runner/data \
+  /srv/mcp-podman/runner/storage /srv/mcp-podman/runner/tmp
+exec /usr/local/libexec/mcp-workspaced "$@" \
+  -state-dir /var/lib/mcp-workspaced \
+  -data-dir /srv/mcp-podman/runner/data \
+  -image {{ mcp_image | quote }} \
+  -podman /usr/bin/podman \
+{% for dns in mcp_public_dns %}
+  -public-dns {{ dns | quote }} \
+{% endfor %}
+{% for flag, value in mcp_policy.items() %}
+  -{{ flag }} {{ value | string | quote }}{{ ' \\' if not loop.last else '' }}
+{% endfor %}

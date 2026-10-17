@@ -1,0 +1,112 @@
+---
+- name: Inspect supported nft-backed alternatives without switching authorities
+  ansible.builtin.command:
+    argv: ['/usr/sbin/{{ item }}', --version]
+  loop: [iptables, ip6tables]
+  register: mcp_firewall_frontends
+  changed_when: false
+- name: Refuse legacy frontend selection rather than silently switching live policy
+  ansible.builtin.assert:
+    that: "'(nf_tables)' in item.stdout"
+  loop: '{{ mcp_firewall_frontends.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+- name: Render complete explicitly owned filter tables preserving reviewed host baseline
+  ansible.builtin.set_fact:
+    mcp_rules_v4: >-
+      {{ lookup('file', mcp_firewall_baseline_v4) |
+      mcp_firewall(4, mcp_runner_uid, mcp_host_public_addresses, mcp_nonpublic_v4, mcp_public_protocol_v4) }}
+    mcp_rules_v6: >-
+      {{ lookup('file', mcp_firewall_baseline_v6) |
+      mcp_firewall(6, mcp_runner_uid, mcp_host_public_addresses, mcp_nonpublic_v6, mcp_public_protocol_v6) }}
+- name: Inspect whether deployment already owns the filter tables
+  ansible.builtin.stat:
+    path: /etc/mcp-deployment/firewall-owned
+  register: mcp_firewall_owned
+- name: Validate live policy and syntax for both families before installation
+  ansible.builtin.include_tasks: network-family.yml
+  loop:
+    - {family: 4, frontend: iptables-nft, baseline: '{{ mcp_firewall_baseline_v4 }}', rendered: '{{ mcp_rules_v4 }}'}
+    - {family: 6, frontend: ip6tables-nft, baseline: '{{ mcp_firewall_baseline_v6 }}', rendered: '{{ mcp_rules_v6 }}'}
+  loop_control:
+    loop_var: firewall
+- name: Install reviewed IPv4 and IPv6 persistent tables
+  ansible.builtin.copy:
+    content: '{{ item.content }}'
+    dest: '/etc/iptables/rules.v{{ item.family }}'
+    owner: root
+    group: root
+    mode: '0600'
+  loop:
+    - {family: 4, content: '{{ mcp_rules_v4 }}'}
+    - {family: 6, content: '{{ mcp_rules_v6 }}'}
+  register: mcp_firewall_changed
+- name: Configure existing persistence plugins (no second loader)
+  ansible.builtin.copy:
+    dest: /etc/default/netfilter-persistent
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      FLUSH_ON_STOP=0
+      IPTABLES_RESTORE_NOFLUSH=no
+      IP6TABLES_RESTORE_NOFLUSH=no
+      IPTABLES_SKIP_SAVE=yes
+      IP6TABLES_SKIP_SAVE=yes
+  register: mcp_firewall_loader_changed
+- name: Stop admission before a changed two-family firewall apply
+  ansible.builtin.systemd_service:
+    name: '{{ item }}'
+    state: stopped
+  loop: [mcp-tunnel.service, mcp-workspaced.service]
+  when:
+    - item in ansible_facts.services
+    - mcp_firewall_changed.changed or mcp_firewall_loader_changed.changed
+- name: Load changed policy only through netfilter-persistent
+  ansible.builtin.systemd_service:
+    name: netfilter-persistent.service
+    enabled: true
+    state: restarted
+  when: mcp_firewall_changed.changed or mcp_firewall_loader_changed.changed
+- name: Ensure persistent firewall enabled on unchanged apply
+  ansible.builtin.systemd_service:
+    name: netfilter-persistent.service
+    enabled: true
+    state: started
+- name: Check both loaded tables against the exact rendered policy
+  ansible.builtin.command:
+    argv: ['/usr/sbin/{{ item.frontend }}-save', -t, filter]
+  loop:
+    - {frontend: iptables-nft, rendered: '{{ mcp_rules_v4 }}'}
+    - {frontend: ip6tables-nft, rendered: '{{ mcp_rules_v6 }}'}
+  register: mcp_loaded_rules
+  changed_when: false
+  failed_when: (mcp_loaded_rules.stdout | mcp_rules_normalize) != (item.rendered | mcp_rules_normalize)
+- name: Record explicit firewall ownership
+  ansible.builtin.copy:
+    content: |
+      Complete filter tables only; baseline reviewed by operator. Other tables untouched.
+    dest: /etc/mcp-deployment/firewall-owned
+    owner: root
+    group: root
+    mode: '0600'
+- name: Reject competing ping-group definitions
+  ansible.builtin.script:
+    cmd: check-sysctl.py
+    executable: /usr/bin/python3
+  changed_when: false
+- name: Persist exact runner primary GID semantics
+  ansible.builtin.template:
+    src: ping-group.conf.j2
+    dest: /etc/sysctl.d/90-mcp-runner.conf
+    owner: root
+    group: root
+    mode: '0644'
+- name: Read effective ping group range
+  ansible.builtin.command: sysctl -n net.ipv4.ping_group_range
+  register: mcp_ping_group
+  changed_when: false
+- name: Apply only the product sysctl when needed
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/90-mcp-runner.conf
+  when: mcp_ping_group.stdout.split() != [mcp_runner_gid | string, mcp_runner_gid | string]
+  changed_when: true

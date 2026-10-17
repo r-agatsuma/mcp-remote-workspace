@@ -1,0 +1,33 @@
+[Unit]
+Description=Reviewed v0 loopback MCP workspace service
+Requires=netfilter-persistent.service user@{{ mcp_runner_uid }}.service mcp-image-prepare.service
+After=network-online.target netfilter-persistent.service systemd-sysctl.service user@{{ mcp_runner_uid }}.service mcp-image-prepare.service
+Wants=network-online.target
+BindsTo=srv-mcp\x2dpodman.mount
+After=srv-mcp\x2dpodman.mount
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=mcp-runner
+Group=mcp-runner
+UMask=0077
+{% include 'runner-environment.j2' %}
+
+ExecStartPre=/usr/bin/systemctl --user is-active basic.target
+ExecStart=/usr/local/libexec/mcp-launch -daemon -mcp-listen 127.0.0.1:8080
+Restart=on-failure
+RestartSec=10s
+# Source drains for 10 seconds; remaining uncertainty belongs to reconciliation.
+TimeoutStopSec=20s
+KillMode=control-group
+LimitNOFILE=65536
+TasksMax=infinity
+LogNamespace=mcp
+# No NoNewPrivileges/RestrictNamespaces/ProtectControlGroups: newuidmap,
+# newgidmap, rootless mounts, full host procfs/cgroup inspection must work.
+# Unit runs outside the user-manager's exact finite build slices.
+
+[Install]
+WantedBy=multi-user.target

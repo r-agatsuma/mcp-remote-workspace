@@ -1,0 +1,55 @@
+---
+# Canonical deployment constants; preflight rejects incompatible overrides.
+mcp_runner: mcp-runner
+mcp_tunnel: mcp-tunnel
+mcp_data_mount: /srv/mcp-podman
+mcp_endpoint: http://127.0.0.1:8080/mcp
+mcp_go_version: go1.26.9
+# https://go.dev/dl/?mode=json&include=all (linux-arm64 archive)
+mcp_go_sha256: 4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052
+mcp_tunnel_version: v0.0.15
+# Official GitHub release asset digest and SHA256SUMS.txt; see provenance docs.
+mcp_tunnel_sha256: c51bfd883fc22e3445494a03c0179875176564bde470661b308fd83af5d01abb
+mcp_tunnel_source: a390c168ff1b2d14e73a95991c186c6aba3ff5a0
+# Human-selected defaults, not universal architecture constants.
+mcp_public_dns: [8.8.8.8, 8.8.4.4]
+mcp_policy:
+  memory-bytes: 4294967296
+  max-generations: 2
+  swap-bytes: 0
+  cpu-quota: -1
+  cpu-weight: 100
+  pids-max: 512
+  migration-tasks-max: 513
+  nofile: 1024
+  max-backend-operations: 4
+  idle-ttl: 30m
+  absolute-ttl: 24h
+  min-available-bytes: 1073741824
+  min-free-inodes: 1024
+  tool-timeout: 30s
+mcp_runtime_packages:
+  - podman
+  - buildah
+  - crun
+  - passt
+  - uidmap
+  - dbus-user-session
+  - iptables
+  - netfilter-persistent
+  - iptables-persistent
+  - e2fsprogs
+  - systemd
+  - systemd-sysv
+  - ca-certificates
+  - python3
+  - util-linux
+  - procps
+  - acl
+  - unzip
+  - gcc
+  - libc6-dev
+  - binutils
+  - file
+# No safe defaults for revision, image, device/UUID, IDs, firewall baseline,
+# Tunnel identity, or secret source. They are required inventory inputs.

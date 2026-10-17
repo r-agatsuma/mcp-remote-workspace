@@ -1,0 +1,22 @@
+config_version: 1
+control_plane:
+  base_url: https://api.openai.com
+  tunnel_id: {{ mcp_tunnel_id }}
+  api_key: env:CONTROL_PLANE_API_KEY
+  max_inflight_requests: 8
+mcp:
+  server_urls:
+    - channel: main
+      url: http://127.0.0.1:8080/mcp
+  startup_wait_timeout: 60s
+  max_concurrent_requests: 8
+health:
+  listen_addr: 127.0.0.1:0
+  url_file: /run/mcp-tunnel/health-url
+log:
+  level: warn
+  format: json
+  http_raw_unsafe: false
+admin_ui:
+  open_browser: false
+  log_buffer_events: 100

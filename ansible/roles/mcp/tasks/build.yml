@@ -1,0 +1,136 @@
+---
+- name: Create operator-owned artifact directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /usr/local/libexec
+    - /opt/mcp-toolchain
+    - /usr/local/src/mcp-workspaced
+    - '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}'
+    - /var/cache/mcp-build
+- name: Download exact Go archive with official verified checksum
+  ansible.builtin.get_url:
+    url: 'https://go.dev/dl/{{ mcp_go_version }}.linux-arm64.tar.gz'
+    dest: '/var/cache/mcp-build/{{ mcp_go_version }}.linux-arm64.tar.gz'
+    checksum: 'sha256:{{ mcp_go_sha256 }}'
+    owner: root
+    group: root
+    mode: '0644'
+- name: Install exact Go toolchain
+  ansible.builtin.unarchive:
+    src: '/var/cache/mcp-build/{{ mcp_go_version }}.linux-arm64.tar.gz'
+    dest: /opt/mcp-toolchain
+    remote_src: true
+    creates: /opt/mcp-toolchain/go/bin/go
+- name: Check installed toolchain identity
+  ansible.builtin.command: /opt/mcp-toolchain/go/bin/go version
+  environment:
+    GOTOOLCHAIN: go1.26.9
+  register: mcp_go_identity
+  changed_when: false
+- name: Reject a different installed Go
+  ansible.builtin.assert:
+    that: mcp_go_identity.stdout == 'go version go1.26.9 linux/arm64'
+- name: Create temporary controller archive directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: mcp-source-
+  delegate_to: localhost
+  become: false
+  register: mcp_archive_dir
+  changed_when: false
+- name: Transfer only committed exact source (not controller working files)
+  block:
+    - name: Archive exact commit on controller without target GitHub credentials
+      ansible.builtin.command:
+        argv: [git, -C, '{{ mcp_source_repository }}', archive, '--format=tar', '--output={{ mcp_archive_dir.path }}/source.tar', '{{ mcp_source_revision }}']
+      delegate_to: localhost
+      become: false
+      changed_when: false
+    - name: Transfer exact source archive
+      ansible.builtin.copy:
+        src: '{{ mcp_archive_dir.path }}/source.tar'
+        dest: '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}/source.tar'
+        owner: root
+        group: root
+        mode: '0644'
+    - name: Extract exact source
+      ansible.builtin.unarchive:
+        src: '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}/source.tar'
+        dest: '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}'
+        remote_src: true
+        creates: '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}/source-extracted'
+    - name: Mark complete extraction only after successful unarchive
+      ansible.builtin.copy:
+        content: '{{ mcp_source_revision }}'
+        dest: '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}/source-extracted'
+        owner: root
+        group: root
+        mode: '0644'
+  always:
+    - name: Remove controller-only temporary source archive
+      ansible.builtin.file:
+        path: '{{ mcp_archive_dir.path }}'
+        state: absent
+      delegate_to: localhost
+      become: false
+      changed_when: false
+- name: Build candidate and retain linkage/module/artifact provenance
+  ansible.builtin.script:
+    cmd: 'build-candidate.sh {{ mcp_source_revision }} {{ mcp_go_sha256 }}'
+    creates: '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}/provenance.json'
+    executable: /bin/bash
+  environment:
+    GOTOOLCHAIN: go1.26.9
+    GOSUMDB: sum.golang.org
+    GOPROXY: https://proxy.golang.org
+    GOMODCACHE: /var/cache/mcp-build/modules
+    GOCACHE: /var/cache/mcp-build/cache
+    CGO_ENABLED: '1'
+- name: Verify candidate provenance before replacing the installed binary
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import hashlib,json,pathlib,sys;
+        d=pathlib.Path('/usr/local/src/mcp-workspaced')/sys.argv[1];
+        p=json.loads((d/'provenance.json').read_text());
+        assert p['source_revision']==sys.argv[1] and p['go_toolchain']=='go1.26.9';
+        assert p['go_archive_sha256']==sys.argv[2];
+        assert p['source_archive_sha256']==hashlib.sha256((d/'source.tar').read_bytes()).hexdigest();
+        assert p['binary_sha256']==hashlib.sha256((d/'mcp-workspaced').read_bytes()).hexdigest()
+      - '{{ mcp_source_revision }}'
+      - '{{ mcp_go_sha256 }}'
+  changed_when: false
+- name: Install root-owned reviewed artifact atomically
+  ansible.builtin.copy:
+    src: '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}/mcp-workspaced'
+    dest: /usr/local/libexec/mcp-workspaced
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+  notify: Restart product
+- name: Install exact provenance record
+  ansible.builtin.copy:
+    src: '/usr/local/src/mcp-workspaced/{{ mcp_source_revision }}/provenance.json'
+    dest: /etc/mcp-deployment/provenance.json
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+- name: Verify installed binary against provenance
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import hashlib,json;
+        p=json.load(open('/etc/mcp-deployment/provenance.json'));
+        assert hashlib.sha256(open('/usr/local/libexec/mcp-workspaced','rb').read()).hexdigest()==p['binary_sha256']
+  changed_when: false

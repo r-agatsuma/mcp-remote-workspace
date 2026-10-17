@@ -1,0 +1,84 @@
+---
+- name: Require supported platform and explicit non-secret inputs
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == 'Ubuntu'
+      - ansible_distribution_version == '24.04'
+      - ansible_architecture == 'aarch64'
+      - ansible_service_mgr == 'systemd'
+      - mcp_runner == 'mcp-runner' and mcp_tunnel == 'mcp-tunnel'
+      - mcp_data_mount == '/srv/mcp-podman'
+      - mcp_endpoint == 'http://127.0.0.1:8080/mcp'
+      - mcp_go_version == 'go1.26.9'
+      - mcp_tunnel_version == 'v0.0.15'
+      - mcp_go_sha256 is match('^[0-9a-f]{64}$')
+      - mcp_tunnel_sha256 is match('^[0-9a-f]{64}$')
+      - mcp_source_revision is match('^[0-9a-f]{40}$')
+      - mcp_source_repository is match('^/[^\n]+$')
+      - mcp_image is match('^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$')
+      - mcp_data_device is match('^/dev/disk/by-id/[a-zA-Z0-9._:-]+$')
+      - mcp_data_uuid is match('^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+      - mcp_runner_uid | int >= 1000 and mcp_runner_gid | int >= 1000
+      - mcp_tunnel_uid | int >= 1000 and mcp_tunnel_gid | int >= 1000
+      - mcp_runner_uid != mcp_tunnel_uid and mcp_runner_gid != mcp_tunnel_gid
+      - mcp_subid_start | int >= 100000
+      - mcp_firewall_ownership_confirmed | bool
+      - mcp_firewall_baseline_v4 is match('^/')
+      - mcp_firewall_baseline_v6 is match('^/')
+      - mcp_host_public_addresses is sequence and mcp_host_public_addresses is not string
+      - mcp_tunnel_id is match('^tunnel_[a-zA-Z0-9]+$')
+      - mcp_tunnel_environment_file is match('^/')
+      - mcp_public_dns | length >= 1 and mcp_public_dns | length <= 3
+      - mcp_policy['migration-tasks-max'] | int == mcp_policy['pids-max'] | int + 1
+    fail_msg: Required reviewed v0 inputs missing or unsupported platform; no mutation authorized.
+- name: Validate resolver and host-self literal IP inputs on controller
+  ansible.builtin.command:
+    argv: '{{ ["python3", playbook_dir + "/../scripts/check-input-ips.py"] + mcp_public_dns + ["--self"] + mcp_host_public_addresses }}'
+  delegate_to: localhost
+  become: false
+  changed_when: false
+- name: Inspect exact controller source object
+  ansible.builtin.command:
+    argv: [git, -C, '{{ mcp_source_repository }}', rev-parse, '{{ mcp_source_revision }}^{commit}']
+  delegate_to: localhost
+  become: false
+  register: mcp_revision
+  changed_when: false
+- name: Refuse tag or abbreviated source authority
+  ansible.builtin.assert:
+    that: mcp_revision.stdout == mcp_source_revision
+- name: Inspect competing firewall service configuration
+  ansible.builtin.service_facts:
+- name: Refuse another firewall authority rather than disabling it
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services[item].state != 'running'
+      - ansible_facts.services[item].status | default('disabled') not in ['enabled', 'static']
+    fail_msg: Competing firewall authority requires operator resolution outside ordinary deploy.
+  loop: [ufw.service, nftables.service, firewalld.service]
+  when: item in ansible_facts.services
+- name: Require unified cgroup v2 mount
+  ansible.builtin.command: findmnt --noheadings --output FSTYPE --mountpoint /sys/fs/cgroup
+  register: mcp_cgroup_fs
+  changed_when: false
+- name: Check cgroup filesystem
+  ansible.builtin.assert:
+    that: mcp_cgroup_fs.stdout == 'cgroup2'
+- name: Require enabled host IPv6 rather than silently skipping its policy
+  ansible.builtin.slurp:
+    src: '/proc/sys/net/ipv6/conf/{{ item }}/disable_ipv6'
+  loop: [all, default]
+  register: mcp_ipv6_enabled
+- name: Reject disabled IPv6
+  ansible.builtin.assert:
+    that: (item.content | b64decode | trim) == '0'
+  loop: '{{ mcp_ipv6_enabled.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+- name: Create operator configuration directory
+  ansible.builtin.file:
+    path: /etc/mcp-deployment
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'

@@ -1,0 +1,9 @@
+Environment=HOME=/srv/mcp-podman/runner/home
+Environment=PATH=/usr/local/libexec:/usr/bin:/bin
+Environment=XDG_CONFIG_HOME=/srv/mcp-podman/runner/config
+Environment=XDG_DATA_HOME=/srv/mcp-podman/runner/data
+Environment=XDG_CACHE_HOME=/srv/mcp-podman/runner/cache
+Environment=TMPDIR=/srv/mcp-podman/runner/tmp
+Environment=XDG_RUNTIME_DIR=/run/user/{{ mcp_runner_uid }}
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{{ mcp_runner_uid }}/bus
+BindReadOnlyPaths=/etc/mcp-deployment/resolv.conf:/etc/resolv.conf
