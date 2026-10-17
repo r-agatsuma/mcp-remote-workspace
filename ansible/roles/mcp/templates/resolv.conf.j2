@@ -1,0 +1,4 @@
+# Deployment-owned public defaults; not a host-wide resolver change.
+{% for dns in mcp_public_dns %}
+nameserver {{ dns }}
+{% endfor %}

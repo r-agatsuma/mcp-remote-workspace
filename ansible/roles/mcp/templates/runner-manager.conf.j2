@@ -1,0 +1,20 @@
+[Unit]
+Requires=srv-mcp\x2dpodman.mount netfilter-persistent.service
+After=srv-mcp\x2dpodman.mount netfilter-persistent.service systemd-sysctl.service
+BindsTo=srv-mcp\x2dpodman.mount
+
+[Service]
+LogNamespace=mcp
+# Apply resolver namespace at the manager, NOT just at the daemon. All transient
+# pull/build services inherit this view. No host-wide resolv.conf replacement.
+BindReadOnlyPaths=/etc/mcp-deployment/resolv.conf:/etc/resolv.conf
+Environment=HOME=/srv/mcp-podman/runner/home
+Environment=XDG_CONFIG_HOME=/srv/mcp-podman/runner/config
+Environment=XDG_DATA_HOME=/srv/mcp-podman/runner/data
+Environment=XDG_CACHE_HOME=/srv/mcp-podman/runner/cache
+Environment=TMPDIR=/srv/mcp-podman/runner/tmp
+Environment=XDG_RUNTIME_DIR=/run/user/{{ mcp_runner_uid }}
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{{ mcp_runner_uid }}/bus
+Delegate=cpu memory pids
+# No whole-user finite build ceiling; exact transient slices enforce Policy.
+TasksMax=infinity

@@ -1,0 +1,33 @@
+#!/usr/bin/python3
+"""Unprivileged component precondition, shared Podman/standalone Buildah store.
+
+Invoked on the target at deploy/start, never by source-only validation. It does
+not build, run, delete, or prune any workspace. Runtime success is #95 evidence.
+"""
+import json
+import os
+import subprocess
+
+
+def require(condition):
+    if not condition:
+        raise ValueError('invalid store')
+
+
+def store(command):
+    data = json.loads(subprocess.check_output(command, text=True))
+    result = {k.lower(): v for k, v in data['store'].items()}
+    require(result['graphroot'] == '/srv/mcp-podman/runner/storage')
+    require(result['runroot'] == f'/run/user/{os.geteuid()}/containers')
+    require(result['graphdrivername'] == 'overlay')
+    require('mount_program' not in json.dumps(result.get('graphoptions', {})))
+    return result
+
+
+if __name__ == '__main__':
+    try:
+        require(os.geteuid() != 0)
+        store(['/usr/bin/podman', '--remote=false', 'info', '--format=json'])
+        store(['/usr/bin/buildah', 'info'])
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        raise SystemExit('Rootless native-overlay shared store verification failed')

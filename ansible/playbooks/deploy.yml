@@ -1,0 +1,11 @@
+---
+- name: Deploy reviewed v0 source to the explicitly selected dedicated host
+  hosts: mcp
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Prepare supported Minimal host interpreter
+      ansible.builtin.import_tasks: tasks/prepare-python.yml
+  roles:
+    - mcp

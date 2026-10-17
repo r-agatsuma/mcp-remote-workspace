@@ -1,0 +1,30 @@
+---
+# Copy outside the repository; do not fill this tracked example with live inputs.
+mcp_source_revision: REPLACE_WITH_REVIEWED_40_HEX_COMMIT
+mcp_source_repository: /absolute/controller/path/to/mcp-remote-workspace
+mcp_image: registry.example.invalid/canonical@sha256:REPLACE_WITH_64_HEX_DIGEST
+mcp_data_device: /dev/disk/by-id/REPLACE_WITH_DEDICATED_WHOLE_DEVICE
+mcp_data_uuid: REPLACE_WITH_EXPECTED_EXT4_UUID
+mcp_data_device_serial: REPLACE_WITH_LSBLK_SERIAL
+mcp_data_device_bytes: 0 # exact expected size, bootstrap gate
+mcp_runner_uid: 0 # intentionally invalid; operator chooses unused stable IDs
+mcp_runner_gid: 0
+mcp_tunnel_uid: 0
+mcp_tunnel_gid: 0
+mcp_subid_start: 0 # dedicated, nonoverlapping 65536-ID range
+mcp_public_dns: [8.8.8.8, 8.8.4.4]
+mcp_tunnel_id: REPLACE_WITH_EXISTING_TUNNEL_ID
+# Controller file containing CONTROL_PLANE_API_KEY=<runtime key>, never argv.
+# Provisioned only if absent. Routine apply does not rotate an existing key.
+mcp_tunnel_environment_file: /absolute/protected/controller/path/tunnel-runtime.env
+# Dedicated-host firewall adoption is explicit. These files are reviewed complete
+# iptables-nft-save / ip6tables-nft-save snapshots (without packet counters).
+# They retain host INPUT/FORWARD/operator access policy. No example opens SSH.
+mcp_firewall_baseline_v4: /absolute/controller/path/reviewed-rules.v4
+mcp_firewall_baseline_v6: /absolute/controller/path/reviewed-rules.v6
+mcp_firewall_ownership_confirmed: false
+# All host public/NAT self addresses, including addresses not assigned locally.
+# Required even if [] is intentional; deployment also denies --dst-type LOCAL.
+mcp_host_public_addresses: [REPLACE_WITH_PUBLIC_SELF_IP]
+# Used only by bootstrap-data.yml, NEVER by deploy.yml.
+mcp_bootstrap_confirm: '' # must equal "INITIALIZE <UUID> ON <device>"

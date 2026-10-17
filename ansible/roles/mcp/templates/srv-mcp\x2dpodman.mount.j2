@@ -1,0 +1,13 @@
+[Unit]
+Description=Dedicated disposable ext4 Data pool (never Boot fallback)
+Before=mcp-workspaced.service
+
+[Mount]
+What=/dev/disk/by-uuid/{{ mcp_data_uuid }}
+Where=/srv/mcp-podman
+Type=ext4
+Options=nodev,nosuid,noatime
+TimeoutSec=90
+
+[Install]
+WantedBy=multi-user.target

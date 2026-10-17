@@ -1,0 +1,17 @@
+---
+# Minimal Ubuntu may lack the interpreter needed by Ansible modules.
+- name: Bootstrap Ansible interpreter only on the supported OS and architecture
+  ansible.builtin.raw: |
+    set -eu
+    . /etc/os-release
+    test "$ID" = ubuntu && test "$VERSION_ID" = 24.04
+    test "$(uname -m)" = aarch64
+    if ! test -x /usr/bin/python3; then
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-apt
+      printf '\nMCP_PYTHON_INSTALLED\n'
+    fi
+  register: mcp_python_bootstrap
+  changed_when: "'MCP_PYTHON_INSTALLED' in mcp_python_bootstrap.stdout"
+- name: Gather facts after interpreter availability
+  ansible.builtin.setup:

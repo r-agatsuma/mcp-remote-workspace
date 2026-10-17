@@ -7,6 +7,11 @@ procfs/cgroup fixtures, and simulated previous boot records. Actual saturation,
 user-scope killing, control-plane survival, reboot recovery and resource bounds
 on OCI remain #95 evidence. Deployment is #94; clean ChatGPT/Tunnel E2E is #96.
 
+The [deployment operations runbook](deployment.md#operations-and-exclusive-recovery)
+provides the same CLI with the configured account, resolver namespace, user bus,
+image, journal/Data paths and policy. Stop admission first; no journal edits,
+global prune or whole-user kills are part of that procedure.
+
 ## Terminal-evidence map
 
 Each backend reservation is durably recorded before submission with operation ID,

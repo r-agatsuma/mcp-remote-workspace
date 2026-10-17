@@ -1,0 +1,33 @@
+---
+# DESTRUCTIVE ENTRYPOINT. Never imported by deploy.yml.
+- name: Explicitly initialize a verified blank dedicated whole Data device
+  hosts: mcp
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Prepare supported Minimal host interpreter
+      ansible.builtin.import_tasks: tasks/prepare-python.yml
+  tasks:
+    - name: Require supported target and exact destructive acknowledgment
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04'
+          - ansible_architecture == 'aarch64'
+          - mcp_data_device is match('^/dev/disk/by-id/[a-zA-Z0-9._:-]+$')
+          - mcp_data_uuid is match('^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+          - mcp_data_device_bytes | int > 0
+          - mcp_data_device_serial | length > 0
+          - mcp_bootstrap_confirm == 'INITIALIZE ' + mcp_data_uuid + ' ON ' + mcp_data_device
+    - name: Install filesystem tooling without initializing anything
+      ansible.builtin.apt:
+        name: [e2fsprogs, util-linux, python3]
+        state: present
+    - name: Verify blank whole-device identity then format exactly once
+      ansible.builtin.script:
+        cmd: >-
+          ../scripts/bootstrap-data.py {{ mcp_data_device | quote }}
+          {{ mcp_data_uuid | quote }} {{ mcp_data_device_serial | quote }}
+          {{ mcp_data_device_bytes | quote }}
+        executable: /usr/bin/python3
+      changed_when: true
