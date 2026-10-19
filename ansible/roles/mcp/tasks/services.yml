@@ -1,0 +1,175 @@
+---
+- name: Validate required executable dependencies (standalone Buildah mandatory)
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop: [/usr/bin/podman, /usr/bin/buildah, /usr/bin/crun, /usr/bin/pasta, /usr/bin/newuidmap, /usr/bin/newgidmap, /usr/bin/systemctl, /usr/bin/systemd-run]
+  register: mcp_executables
+- name: Refuse missing runtime executables
+  ansible.builtin.assert:
+    that: item.stat.exists and item.stat.executable
+  loop: '{{ mcp_executables.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+- name: Create root-owned service and journal configuration directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - '/etc/systemd/system/user@{{ mcp_runner_uid }}.service.d'
+    - /etc/systemd/system/systemd-journald@mcp.service.d
+    - /srv/mcp-podman/journal
+- name: Inspect current runner user manager without changing it
+  ansible.builtin.command:
+    argv: [systemctl, is-active, 'user@{{ mcp_runner_uid }}.service']
+  register: mcp_manager_active
+  changed_when: false
+  failed_when: mcp_manager_active.rc not in [0, 3, 4]
+- name: Preview manager namespace/environment change
+  ansible.builtin.template:
+    src: runner-manager.conf.j2
+    dest: '/etc/systemd/system/user@{{ mcp_runner_uid }}.service.d/90-mcp.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  check_mode: true
+  register: mcp_manager_delta
+- name: Preview trusted resolver change
+  ansible.builtin.template:
+    src: resolv.conf.j2
+    dest: /etc/mcp-deployment/resolv.conf
+    owner: root
+    group: root
+    mode: '0644'
+  check_mode: true
+  register: mcp_resolver_delta
+- name: Refuse changing a live manager or its pinned resolver namespace
+  ansible.builtin.assert:
+    that: mcp_manager_active.rc != 0 or not (mcp_manager_delta.changed or mcp_resolver_delta.changed)
+    fail_msg: >-
+      Manager/resolver change requires the documented disable-linger and authorized
+      reboot maintenance path; never whole-user kill or stale pause adoption.
+- name: Install trusted resolver file (not host-wide resolver mutation)
+  ansible.builtin.template:
+    src: resolv.conf.j2
+    dest: /etc/mcp-deployment/resolv.conf
+    owner: root
+    group: root
+    mode: '0644'
+- name: Install exact manager delegation and resolver namespace
+  ansible.builtin.template:
+    src: runner-manager.conf.j2
+    dest: '/etc/systemd/system/user@{{ mcp_runner_uid }}.service.d/90-mcp.conf'
+    owner: root
+    group: root
+    mode: '0644'
+- name: Configure common rootless storage and engine context
+  ansible.builtin.template:
+    src: '{{ item }}.j2'
+    dest: '/srv/mcp-podman/runner/config/containers/{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [storage.conf, containers.conf]
+  notify: Restart product
+- name: Configure deterministic short-name acquisition
+  ansible.builtin.copy:
+    dest: /srv/mcp-podman/runner/config/containers/registries.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      unqualified-search-registries = ["docker.io"]
+      short-name-mode = "disabled"
+  notify: Restart product
+- name: Install empty canonical-pull authentication input
+  ansible.builtin.copy:
+    content: |
+      {"auths":{}}
+    dest: /etc/mcp-deployment/empty-auth.json
+    owner: root
+    group: root
+    mode: '0644'
+- name: Install namespaced journald bounds (product logs on Data, not host logs)
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald@mcp.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Journal]
+      Storage=persistent
+      SystemMaxUse=32M
+      SystemMaxFileSize=8M
+      RuntimeMaxUse=8M
+      ForwardToSyslog=no
+      ForwardToKMsg=no
+      ForwardToConsole=no
+      RateLimitIntervalSec=30s
+      RateLimitBurst=100
+  notify: Restart product journal
+- name: Bind only product journal namespace storage onto Data
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/systemd-journald@mcp.service.d/90-data.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      Requires=srv-mcp\x2dpodman.mount
+      After=srv-mcp\x2dpodman.mount
+      BindsTo=srv-mcp\x2dpodman.mount
+      [Service]
+      LogsDirectory=
+      BindPaths=/srv/mcp-podman/journal:/var/log/journal
+  notify: Restart product journal
+- name: Install unprivileged shared-store verifier
+  ansible.builtin.copy:
+    src: mcp-store-check
+    dest: /usr/local/libexec/mcp-store-check
+    owner: root
+    group: root
+    mode: '0755'
+- name: Install unprivileged product launch adapters
+  ansible.builtin.template:
+    src: '{{ item }}.j2'
+    dest: '/usr/local/libexec/{{ item }}'
+    owner: root
+    group: root
+    mode: '0755'
+  loop: [mcp-launch, mcp-image-prepare]
+  notify: Restart product
+- name: Install root-owned product units
+  ansible.builtin.template:
+    src: '{{ item }}.j2'
+    dest: '/etc/systemd/system/{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [mcp-workspaced.service, mcp-image-prepare.service]
+  notify: Restart product
+- name: Enable unattended runner manager using supported linger mechanism
+  ansible.builtin.command: loginctl enable-linger mcp-runner
+  args:
+    creates: /var/lib/systemd/linger/mcp-runner
+- name: Start exact runner manager after prerequisites
+  ansible.builtin.systemd_service:
+    name: 'user@{{ mcp_runner_uid }}.service'
+    daemon_reload: true
+    state: started
+- name: Check exact user bus exists
+  ansible.builtin.stat:
+    path: '/run/user/{{ mcp_runner_uid }}/bus'
+  register: mcp_bus
+- name: Require user bus socket
+  ansible.builtin.assert:
+    that: mcp_bus.stat.exists and mcp_bus.stat.issock
+- name: Check required cgroup controllers in exact manager hierarchy
+  ansible.builtin.slurp:
+    src: '/sys/fs/cgroup/user.slice/user-{{ mcp_runner_uid }}.slice/user@{{ mcp_runner_uid }}.service/cgroup.controllers'
+  register: mcp_controllers
+- name: Require cpu memory and pids delegated controllers
+  ansible.builtin.assert:
+    that: "['cpu', 'memory', 'pids'] | difference((mcp_controllers.content | b64decode).split()) | length == 0"

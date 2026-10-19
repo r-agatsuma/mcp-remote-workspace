@@ -1,0 +1,42 @@
+#!/usr/bin/python3
+"""Unprivileged startup check. No mounts, mutation, recovery or privileged calls."""
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+
+
+def require(condition):
+    if not condition:
+        raise ValueError('invalid Data mount')
+
+
+def check(uuid, paths):
+    mount = '/srv/mcp-podman'
+    result = subprocess.run(
+        ['/usr/bin/findmnt', '--json', '--mountpoint', mount,
+         '--output', 'TARGET,SOURCE,FSTYPE,OPTIONS'],
+        check=True, capture_output=True, text=True)
+    entries = json.loads(result.stdout)['filesystems']
+    require(len(entries) == 1)
+    entry = entries[0]
+    require(entry['target'] == mount and entry['fstype'] == 'ext4')
+    require({'rw', 'nodev', 'nosuid', 'noatime'} <= set(entry['options'].split(',')))
+    expected = os.stat('/dev/disk/by-uuid/' + uuid)
+    actual = os.stat(entry['source'])
+    require(stat.S_ISBLK(expected.st_mode) and actual.st_rdev == expected.st_rdev)
+    require(os.stat(mount).st_dev != os.stat('/').st_dev)
+    for path in paths:
+        require(Path(path).is_dir() and not Path(path).is_symlink())
+        require(os.path.commonpath([mount, os.path.realpath(path)]) == mount)
+        require(os.stat(path).st_dev == os.stat(mount).st_dev)
+
+
+if __name__ == '__main__':
+    try:
+        check(sys.argv[1], sys.argv[2:])
+    except (AssertionError, OSError, ValueError, KeyError, IndexError,
+            subprocess.SubprocessError):
+        raise SystemExit('Data mount/path verification failed; startup refused')

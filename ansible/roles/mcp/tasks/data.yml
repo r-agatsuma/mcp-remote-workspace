@@ -1,0 +1,95 @@
+---
+- name: Require dedicated whole-device geometry
+  ansible.builtin.command:
+    argv: [lsblk, --nodeps, --noheadings, --output, TYPE, '{{ mcp_data_device }}']
+  register: mcp_device_type
+  changed_when: false
+- name: Reject partition or mapped-device substitution
+  ansible.builtin.assert:
+    that: mcp_device_type.stdout == 'disk'
+- name: Inspect existing Data filesystem without formatting
+  ansible.builtin.command:
+    argv: [blkid, -p, -o, export, '{{ mcp_data_device }}']
+  register: mcp_blkid
+  changed_when: false
+- name: Require exact pre-existing ext4 identity
+  ansible.builtin.assert:
+    that:
+      - "('UUID=' + mcp_data_uuid) in mcp_blkid.stdout_lines"
+      - "'TYPE=ext4' in mcp_blkid.stdout_lines"
+    fail_msg: Wrong or absent filesystem; ordinary deploy never formats. See bootstrap-data.yml.
+- name: Inspect ext4 reservation
+  ansible.builtin.command:
+    argv: [tune2fs, -l, '{{ mcp_data_device }}']
+  environment:
+    LC_ALL: C
+  register: mcp_ext4
+  changed_when: false
+- name: Check exact ten-percent reservation (integer block rounding only)
+  ansible.builtin.assert:
+    that:
+      - >-
+        (mcp_ext4.stdout | regex_search('(?m)^Reserved block count:\s+(\d+)', '\1') | first | int) ==
+        ((mcp_ext4.stdout | regex_search('(?m)^Block count:\s+(\d+)', '\1') | first | int) // 10)
+      - "mcp_ext4.stdout is search('Reserved blocks uid:\\s+0 ' )"
+      - "mcp_ext4.stdout is search('Reserved blocks gid:\\s+0 ' )"
+- name: Inspect whether intended mount is already present
+  ansible.builtin.command: mountpoint --quiet /srv/mcp-podman
+  register: mcp_already_mounted
+  changed_when: false
+  failed_when: mcp_already_mounted.rc not in [0, 32]
+- name: Inspect durable guard-provisioning record
+  ansible.builtin.stat:
+    path: /etc/mcp-deployment/boot-guard-established
+  register: mcp_guard_record
+- name: Refuse adopting an already mounted Data volume with unknown Boot guard
+  ansible.builtin.assert:
+    that: mcp_already_mounted.rc == 32 or mcp_guard_record.stat.exists
+    fail_msg: First deployment requires Data unmounted so the Boot-side guard can be established; no automatic unmount.
+- name: Establish Boot-side guard ONLY when unmounted
+  ansible.builtin.file:
+    path: /srv/mcp-podman
+    state: directory
+    owner: root
+    group: root
+    mode: '0000'
+  when: mcp_already_mounted.rc == 32
+- name: Record Boot-side guard establishment
+  ansible.builtin.copy:
+    content: |
+      /srv/mcp-podman root:root 000; established while unmounted
+    dest: /etc/mcp-deployment/boot-guard-established
+    owner: root
+    group: root
+    mode: '0600'
+  when: mcp_already_mounted.rc == 32
+- name: Install stable Data mount unit
+  ansible.builtin.template:
+    src: srv-mcp\x2dpodman.mount.j2
+    dest: /etc/systemd/system/srv-mcp\x2dpodman.mount
+    owner: root
+    group: root
+    mode: '0644'
+- name: Enable and mount existing Data
+  ansible.builtin.systemd_service:
+    name: srv-mcp\x2dpodman.mount
+    daemon_reload: true
+    enabled: true
+    state: started
+- name: Install unprivileged mount verifier
+  ansible.builtin.copy:
+    src: mcp-data-check
+    dest: /usr/local/libexec/mcp-data-check
+    owner: root
+    group: root
+    mode: '0755'
+- name: Verify actual mounted identity before creating any Data paths
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/mcp-data-check, '{{ mcp_data_uuid }}']
+  changed_when: false
+- name: Permit traversal of verified mounted filesystem (not Boot guard)
+  ansible.builtin.file:
+    path: /srv/mcp-podman
+    owner: root
+    group: root
+    mode: '0711'

@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+# Same uid/HOME/config/storage/resolver as the product. No floating fetch input.
+if /usr/bin/podman --remote=false image exists -- {{ mcp_image | quote }}; then
+  exit 0
+fi
+/usr/bin/podman --remote=false pull --authfile=/etc/mcp-deployment/empty-auth.json -- {{ mcp_image | quote }}
+/usr/bin/podman --remote=false image exists -- {{ mcp_image | quote }}

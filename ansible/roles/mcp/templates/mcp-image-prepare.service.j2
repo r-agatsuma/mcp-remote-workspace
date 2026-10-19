@@ -1,0 +1,23 @@
+[Unit]
+Description=Install immutable canonical image in the shared rootless store
+Requires=netfilter-persistent.service user@{{ mcp_runner_uid }}.service
+After=network-online.target netfilter-persistent.service user@{{ mcp_runner_uid }}.service
+Wants=network-online.target
+BindsTo=srv-mcp\x2dpodman.mount
+After=srv-mcp\x2dpodman.mount
+Before=mcp-workspaced.service
+
+[Service]
+Type=oneshot
+User=mcp-runner
+Group=mcp-runner
+UMask=0077
+{% include 'runner-environment.j2' %}
+
+ExecStartPre=/usr/local/libexec/mcp-data-check {{ mcp_data_uuid }} /srv/mcp-podman/runner/storage
+ExecStartPre=/usr/local/libexec/mcp-store-check
+ExecStart=/usr/local/libexec/mcp-image-prepare
+RemainAfterExit=yes
+TimeoutStartSec=15min
+TimeoutStopSec=20s
+LogNamespace=mcp

@@ -1,0 +1,28 @@
+---
+- name: Restart product journal
+  ansible.builtin.systemd_service:
+    name: systemd-journald@mcp.service
+    daemon_reload: true
+    state: restarted
+- name: Stop old product before applying changed runtime configuration
+  listen: Restart product
+  ansible.builtin.systemd_service:
+    name: mcp-workspaced.service
+    state: stopped
+- name: Refresh immutable canonical image precondition
+  listen: Restart product
+  ansible.builtin.systemd_service:
+    name: mcp-image-prepare.service
+    daemon_reload: true
+    state: restarted
+- name: Start updated product with reconciled state
+  listen: Restart product
+  ansible.builtin.systemd_service:
+    name: mcp-workspaced.service
+    daemon_reload: true
+    state: started
+- name: Restart tunnel
+  ansible.builtin.systemd_service:
+    name: mcp-tunnel.service
+    daemon_reload: true
+    state: restarted

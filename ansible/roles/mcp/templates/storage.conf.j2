@@ -1,0 +1,5 @@
+[storage]
+driver = "overlay"
+runroot = "/run/user/{{ mcp_runner_uid }}/containers"
+graphroot = "/srv/mcp-podman/runner/storage"
+# Native overlay; intentionally no mount_program / fuse fallback.

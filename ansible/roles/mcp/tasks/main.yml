@@ -1,0 +1,74 @@
+---
+- name: Validate required deployment inputs before mutation
+  ansible.builtin.import_tasks: preflight.yml
+- name: Install supported runtime and build packages
+  ansible.builtin.apt:
+    name: '{{ mcp_runtime_packages }}'
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    policy_rc_d: 101
+- name: Create operator-owned helper directory
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+- name: Provision non-destructive Data mount
+  ansible.builtin.import_tasks: data.yml
+- name: Provision separated accounts and rootless prerequisites
+  ansible.builtin.import_tasks: accounts.yml
+- name: Build exact controller-owned source
+  ansible.builtin.import_tasks: build.yml
+- name: Install root-managed persistent network policy
+  ansible.builtin.import_tasks: network.yml
+- name: Install runtime configuration and services
+  ansible.builtin.import_tasks: services.yml
+- name: Install pinned Tunnel client and protected configuration
+  ansible.builtin.import_tasks: tunnel.yml
+- name: Apply pending product changes before starting services
+  ansible.builtin.meta: flush_handlers
+- name: Enable and start product
+  ansible.builtin.systemd_service:
+    name: mcp-workspaced.service
+    daemon_reload: true
+    enabled: true
+    state: started
+- name: Enable and start Tunnel (active is NOT readiness evidence)
+  ansible.builtin.systemd_service:
+    name: mcp-tunnel.service
+    enabled: true
+    state: started
+- name: Record exact installed package versions
+  ansible.builtin.command:
+    argv: '{{ ["dpkg-query", "-W", "-f=${Package}=${Version}\n"] + mcp_runtime_packages }}'
+  register: mcp_packages
+  changed_when: false
+- name: Record exact non-secret deployment handoff inputs
+  ansible.builtin.copy:
+    content: >-
+      {{ {'application_revision': mcp_source_revision, 'toolchain': mcp_go_version,
+          'target': 'Ubuntu 24.04 linux/arm64', 'image': mcp_image,
+          'runner_uid': mcp_runner_uid, 'runner_gid': mcp_runner_gid,
+          'tunnel_uid': mcp_tunnel_uid, 'tunnel_gid': mcp_tunnel_gid,
+          'subid_start': mcp_subid_start, 'subid_count': 65536,
+          'dns': mcp_public_dns, 'endpoint': mcp_endpoint, 'policy': mcp_policy,
+          'data_device': mcp_data_device, 'data_uuid': mcp_data_uuid,
+          'data_mount': mcp_data_mount, 'data_options': 'nodev,nosuid,noatime',
+          'ext4_reserve_percent': 10, 'tunnel_version': mcp_tunnel_version,
+          'tunnel_archive_sha256': mcp_tunnel_sha256, 'tunnel_id': mcp_tunnel_id,
+          'credential_path': '/etc/mcp-tunnel/runtime.env',
+          'firewall_authority': 'iptables-nft/ip6tables-nft/netfilter-persistent',
+          'public_self_addresses': mcp_host_public_addresses} | to_nice_json }}
+    dest: /etc/mcp-deployment/inputs.json
+    owner: root
+    group: root
+    mode: '0600'
+- name: Preserve package evidence
+  ansible.builtin.copy:
+    content: "{{ mcp_packages.stdout }}\n"
+    dest: /etc/mcp-deployment/packages.txt
+    owner: root
+    group: root
+    mode: '0644'
