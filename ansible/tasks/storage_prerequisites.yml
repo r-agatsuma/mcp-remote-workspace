@@ -1,0 +1,10 @@
+---
+- name: Install bounded Ubuntu Noble storage inspection prerequisites
+  ansible.builtin.apt:
+    name:
+      - e2fsprogs=1.47.0-*
+      - util-linux=2.39.3-*
+      - udev=255.4-*
+    state: present
+    update_cache: true
+    allow_downgrade: false

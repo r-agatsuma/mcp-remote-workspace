@@ -1,0 +1,261 @@
+---
+- name: Require S3A identity facts and the fixed S3B placement contract
+  ansible.builtin.assert:
+    that:
+      - mcp_runner_account == 'mcp-runner'
+      - mcp_runner_uid | int > 0
+      - mcp_runner_primary_gid | int > 0
+      - mcp_data_mount == '/srv/mcp-podman'
+      - mcp_runner_home == mcp_data_mount + '/runner'
+      - mcp_runtime_graphroot == mcp_runner_home + '/.local/share/containers/storage'
+      - mcp_runtime_static_dir == mcp_runtime_graphroot + '/libpod'
+      - mcp_runtime_volume_path == mcp_runtime_graphroot + '/volumes'
+      - mcp_runtime_tmp == mcp_data_mount + '/tmp'
+      - mcp_runtime_events == mcp_data_mount + '/events/events.log'
+      - mcp_workspace_data_dir == mcp_data_mount + '/workspaces'
+      - mcp_workspace_state_dir == mcp_runner_home + '/.local/state/mcp-workspaced'
+      - ansible_kernel is version('6.8', '>=')
+    fail_msg: 'STOP: S3A facts, fixed Data placement or native-overlay/openat2/fchmodat2 kernel prerequisites are missing.'
+
+- name: Install the distribution storage inspection prerequisites
+  ansible.builtin.import_tasks: ../../../tasks/storage_prerequisites.yml
+
+- name: Verify the selected ext4 filesystem and establish or verify the Boot guard
+  mcp_data_verify:
+    identity: "{{ mcp_data_device_id }}"
+    serial: "{{ mcp_data_expected_serial }}"
+    size: "{{ mcp_data_expected_bytes }}"
+    sector: "{{ mcp_data_expected_sector_bytes }}"
+    uuid: "{{ mcp_data_uuid }}"
+    guard: true
+
+- name: Inspect system mount configuration for competing authority
+  ansible.builtin.command:
+    argv: [/usr/bin/findmnt, --fstab, --raw, --noheadings, --output, TARGET]
+  register: mcp_fstab_mounts
+  changed_when: false
+  failed_when: mcp_fstab_mounts.rc not in [0, 1]
+
+- name: Reject an existing fstab authority for Data
+  ansible.builtin.assert:
+    that:
+      - "'/srv/mcp-podman' not in mcp_fstab_mounts.stdout_lines"
+    fail_msg: 'STOP: Data mount is owned by the S3B native mount unit; resolve competing fstab configuration explicitly.'
+
+- name: Install bounded Ubuntu Noble runtime packages without external repositories
+  ansible.builtin.apt:
+    name:
+      - podman=4.9.3+ds1-*
+      - buildah=1.33.7+ds1-*
+      - passt=0.0~git20240220.1e6f92b-*
+      - crun=1.14.1-*
+      - netavark=1.4.0-*
+      - aardvark-dns=1.4.0-*
+      - uidmap=1:4.13+*
+      - dbus-user-session=1.14.*
+    state: present
+    update_cache: true
+    allow_downgrade: false
+    install_recommends: false
+
+- name: Record resolved runtime package versions
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dpkg-query
+      - -W
+      - '-f=${Package}=${Version}\n'
+      - podman
+      - buildah
+      - passt
+      - crun
+      - netavark
+      - aardvark-dns
+      - uidmap
+      - dbus-user-session
+  register: mcp_runtime_versions
+  changed_when: false
+
+- name: Report resolved runtime package provenance
+  ansible.builtin.debug:
+    var: mcp_runtime_versions.stdout_lines
+
+- name: Require standalone runtime executables and namespace helpers
+  ansible.builtin.command:
+    argv: [/usr/bin/test, -x, "{{ item }}"]
+  loop:
+    - /usr/bin/podman
+    - /usr/bin/buildah
+    - /usr/bin/pasta
+    - /usr/bin/crun
+    - /usr/bin/newuidmap
+    - /usr/bin/newgidmap
+  changed_when: false
+
+- name: Inspect optional fuse fallback executables in the fixed runtime PATH
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /usr/bin/fuse-overlayfs
+    - /bin/fuse-overlayfs
+  register: mcp_fuse_fallback
+
+- name: Refuse an implicit fuse fallback rather than removing host packages
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists
+    fail_msg: 'STOP: reference storage requires native overlay; unexpected fuse-overlayfs in runtime PATH is not removed.'
+  loop: "{{ mcp_fuse_fallback.results }}"
+
+- name: Load the native overlay kernel module
+  ansible.builtin.command:
+    argv: [/usr/sbin/modprobe, overlay]
+  changed_when: false
+
+- name: Check that native overlay is available
+  ansible.builtin.command:
+    argv: [/usr/bin/grep, -w, overlay, /proc/filesystems]
+  changed_when: false
+
+- name: Check unprivileged user namespace prerequisite without changing sysctl policy
+  ansible.builtin.command:
+    argv: [/usr/sbin/sysctl, -n, kernel.unprivileged_userns_clone]
+  register: mcp_userns_clone
+  changed_when: false
+  failed_when: mcp_userns_clone.stdout != '1'
+
+- name: Validate explicit subordinate ranges against existing host allocations
+  mcp_subids_verify:
+    uid_start: "{{ mcp_runner_subuid_start }}"
+    gid_start: "{{ mcp_runner_subgid_start }}"
+    count: "{{ mcp_runner_subid_count }}"
+
+- name: Provision validated subordinate ranges without changing other allocations
+  ansible.builtin.lineinfile:
+    path: "{{ item.path }}"
+    line: "mcp-runner:{{ item.start }}:{{ mcp_runner_subid_count }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - {path: /etc/subuid, start: "{{ mcp_runner_subuid_start }}"}
+    - {path: /etc/subgid, start: "{{ mcp_runner_subgid_start }}"}
+
+- name: Create a protected directory for the read-only one-shot mount verifier
+  ansible.builtin.file:
+    path: /usr/local/lib/mcp-workspaced
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the shared read-only Data inspector
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../module_utils/mcp_data.py"
+    dest: /usr/local/lib/mcp-workspaced/mcp_data.py
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the one-shot Data verifier with trusted selected inputs
+  ansible.builtin.template:
+    src: data-verify.py.j2
+    dest: /usr/local/lib/mcp-workspaced/data-verify
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install Data mount and verification ordering
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - {src: data-verify.service.j2, dest: mcp-data-verify.service}
+    - {src: data.mount.j2, dest: 'srv-mcp\x2dpodman.mount'}
+    - {src: data-ready.service.j2, dest: mcp-data-ready.service}
+
+- name: Enable and start the verified stable-UUID Data mount
+  ansible.builtin.systemd_service:
+    name: 'srv-mcp\x2dpodman.mount'
+    daemon_reload: true
+    enabled: true
+    state: started
+
+- name: Enable the post-mount identity gate before runtime consumers
+  ansible.builtin.systemd_service:
+    name: mcp-data-ready.service
+    enabled: true
+    state: started
+
+- name: Require mounted verified Data immediately before runtime path creation
+  mcp_data_verify:
+    identity: "{{ mcp_data_device_id }}"
+    serial: "{{ mcp_data_expected_serial }}"
+    size: "{{ mcp_data_expected_bytes }}"
+    sector: "{{ mcp_data_expected_sector_bytes }}"
+    uuid: "{{ mcp_data_uuid }}"
+    mounted: true
+    guard: true
+
+- name: Create runtime paths only on mounted Data without following symlinks
+  mcp_data_paths:
+    uid: "{{ mcp_runner_uid }}"
+    gid: "{{ mcp_runner_primary_gid }}"
+
+- name: Install the shared rootless Podman and Buildah configuration
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ mcp_runner_home }}/.config/containers/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - storage.conf
+    - containers.conf
+
+- name: Publish the later launch-environment contract on Data
+  ansible.builtin.template:
+    src: runtime.env.j2
+    dest: "{{ mcp_runner_home }}/.config/environment.d/10-mcp-runtime.conf"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create the native journal configuration directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Bound persistent host control-plane journal metadata
+  ansible.builtin.template:
+    src: journal-bounds.conf.j2
+    dest: /etc/systemd/journald.conf.d/60-mcp-runtime-bounds.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: mcp_journal_bounds
+
+- name: Reload journal bounds only when their configuration changed
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: restarted
+  when: mcp_journal_bounds.changed
+
+- name: Expose the runtime launch environment and mount dependency for later slices
+  ansible.builtin.set_fact:
+    mcp_runtime_environment:
+      PATH: /usr/bin:/bin
+      HOME: "{{ mcp_runner_home }}"
+      XDG_CONFIG_HOME: "{{ mcp_runner_home }}/.config"
+      XDG_DATA_HOME: "{{ mcp_runner_home }}/.local/share"
+      XDG_CACHE_HOME: "{{ mcp_runner_home }}/.cache"
+      XDG_STATE_HOME: "{{ mcp_runner_home }}/.local/state"
+      XDG_RUNTIME_DIR: "/run/user/{{ mcp_runner_uid }}"
+      TMPDIR: "{{ mcp_runtime_tmp }}"
+    mcp_data_mount_unit: 'srv-mcp\x2dpodman.mount'
+    mcp_data_ready_unit: mcp-data-ready.service

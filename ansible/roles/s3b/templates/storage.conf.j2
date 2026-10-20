@@ -1,0 +1,9 @@
+# Same rootless containers/storage configuration for Podman and Buildah.
+[storage]
+driver = "overlay"
+runroot = "/run/user/{{ mcp_runner_uid }}/containers"
+graphroot = "{{ mcp_runtime_graphroot }}"
+rootless_storage_path = "{{ mcp_runtime_graphroot }}"
+[storage.options.overlay]
+# Empty mount_program selects native kernel overlay; no fuse fallback.
+mount_program = ""

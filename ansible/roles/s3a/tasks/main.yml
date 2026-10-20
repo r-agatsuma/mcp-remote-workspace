@@ -53,7 +53,7 @@
     name: "{{ mcp_runner_user }}"
     system: true
     create_home: false
-    home: /nonexistent
+    home: "{{ mcp_runner_home | default('/nonexistent') }}"
     shell: /usr/sbin/nologin
     password_lock: true
     groups: ""

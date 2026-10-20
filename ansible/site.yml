@@ -1,7 +1,8 @@
 ---
-- name: Establish S3A deployment foundation and install mcp-workspaced
+- name: Establish deployment foundation, Data and rootless runtime
   hosts: mcp_hosts
   become: true
   gather_facts: true
   roles:
     - s3a
+    - s3b

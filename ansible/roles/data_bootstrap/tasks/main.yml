@@ -1,0 +1,26 @@
+---
+- name: Require an explicit boolean destructive enable for this run
+  ansible.builtin.assert:
+    that:
+      - mcp_data_bootstrap_enabled | default(false) is sameas true
+      - ansible_distribution == 'Ubuntu'
+      - ansible_distribution_version == '24.04'
+      - ansible_architecture in ['aarch64', 'arm64']
+      - not ansible_check_mode
+    fail_msg: 'STOP: bootstrap is disabled unless explicitly enabled; check mode is not provisioning.'
+
+- name: Install the distribution storage prerequisites after explicit enable
+  ansible.builtin.import_tasks: ../../../tasks/storage_prerequisites.yml
+
+- name: Bootstrap only a blank inactive stable-identity Data disk
+  mcp_data_bootstrap:
+    enabled: "{{ mcp_data_bootstrap_enabled | default(false) }}"
+    identity: "{{ mcp_data_device_id }}"
+    serial: "{{ mcp_data_expected_serial }}"
+    size: "{{ mcp_data_expected_bytes }}"
+    sector: "{{ mcp_data_expected_sector_bytes }}"
+  register: mcp_created_data
+
+- name: Report the created filesystem identity for ordinary deployment input
+  ansible.builtin.debug:
+    msg: "Set mcp_data_uuid={{ mcp_created_data.uuid }} in trusted deployment inputs."

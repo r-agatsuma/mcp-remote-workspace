@@ -1,0 +1,7 @@
+# Native systemd control-plane metadata has an independent retention budget.
+# Workspace/container stdout and runtime events use Data instead of this journal.
+[Journal]
+SystemMaxUse=64M
+SystemMaxFileSize=8M
+RuntimeMaxUse=16M
+RuntimeMaxFileSize=4M
