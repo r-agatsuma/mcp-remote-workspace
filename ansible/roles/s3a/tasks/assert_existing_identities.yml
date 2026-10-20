@@ -49,6 +49,18 @@
          | selectattr('value.1', 'equalto', mcp_existing_tunnel_group[1])
          | list | length == 0)
       - >-
+        mcp_existing_runner_group | length == 0 or
+        (mcp_preexisting_passwd_records | dict2items
+         | rejectattr('key', 'equalto', mcp_runner_user)
+         | selectattr('value.2', 'equalto', mcp_existing_runner_group[1])
+         | list | length == 0)
+      - >-
+        mcp_existing_tunnel_group | length == 0 or
+        (mcp_preexisting_passwd_records | dict2items
+         | rejectattr('key', 'equalto', mcp_tunnel_user)
+         | selectattr('value.2', 'equalto', mcp_existing_tunnel_group[1])
+         | list | length == 0)
+      - >-
         mcp_existing_runner_passwd | length == 0 or
         (mcp_preexisting_group_records | dict2items
          | rejectattr('key', 'equalto', mcp_runner_user)

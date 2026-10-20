@@ -27,6 +27,16 @@
          | selectattr('value.1', 'equalto', mcp_current_tunnel_passwd[1])
          | list | length == 0)
       - >-
+        (mcp_current_passwd_records | dict2items
+         | rejectattr('key', 'equalto', mcp_runner_user)
+         | selectattr('value.2', 'equalto', mcp_current_runner_passwd[2])
+         | list | length == 0)
+      - >-
+        (mcp_current_passwd_records | dict2items
+         | rejectattr('key', 'equalto', mcp_tunnel_user)
+         | selectattr('value.2', 'equalto', mcp_current_tunnel_passwd[2])
+         | list | length == 0)
+      - >-
         (mcp_current_group_records | dict2items
          | rejectattr('key', 'equalto', mcp_runner_user)
          | selectattr('value.1', 'equalto', mcp_current_runner_passwd[2])

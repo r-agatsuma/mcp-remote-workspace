@@ -112,6 +112,61 @@
         that:
           - test_uid_collision_rejected | default(false)
 
+    - name: Reject a foreign primary-GID sharing before mutation
+      block:
+        - name: Provide service accounts and an operator sharing runner's primary GID
+          ansible.builtin.set_fact:
+            mcp_existing_runner_passwd: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_tunnel_passwd: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_runner_group: ["x", "1001", []]
+            mcp_existing_tunnel_group: ["x", "1002", []]
+            mcp_preexisting_passwd_records:
+              mcp-runner: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+              mcp-tunnel: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+              operator: ["x", "2001", "1001", "", "/home/operator", "/bin/sh"]
+            mcp_preexisting_group_records:
+              mcp-runner: ["x", "1001", []]
+              mcp-tunnel: ["x", "1002", []]
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+      rescue:
+        - name: Record expected foreign primary-GID rejection before mutation
+          ansible.builtin.set_fact:
+            test_preexisting_primary_gid_sharing_rejected: true
+
+    - name: Confirm foreign primary-GID sharing was rejected before mutation
+      ansible.builtin.assert:
+        that:
+          - test_preexisting_primary_gid_sharing_rejected | default(false)
+
+    - name: Reject a foreign primary-GID sharing when the service user is absent
+      block:
+        - name: Provide an existing runner group, no runner user, and a sharing operator
+          ansible.builtin.set_fact:
+            mcp_existing_runner_passwd: []
+            mcp_existing_tunnel_passwd: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_runner_group: ["x", "1001", []]
+            mcp_existing_tunnel_group: ["x", "1002", []]
+            mcp_preexisting_passwd_records:
+              mcp-tunnel: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+              operator: ["x", "2001", "1001", "", "/home/operator", "/bin/sh"]
+            mcp_preexisting_group_records:
+              mcp-runner: ["x", "1001", []]
+              mcp-tunnel: ["x", "1002", []]
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+      rescue:
+        - name: Record expected rejection for an existing group without its user
+          ansible.builtin.set_fact:
+            test_absent_service_user_gid_sharing_rejected: true
+
+    - name: Confirm sharing was rejected when the service user was absent
+      ansible.builtin.assert:
+        that:
+          - test_absent_service_user_gid_sharing_rejected | default(false)
+
     - name: Reject a supplementary-group member before mutation
       block:
         - name: Provide a pre-existing supplementary membership
@@ -163,6 +218,38 @@
         that:
           - mcp_runner_uid | int == 1001
           - mcp_runner_primary_gid | int == 1001
+
+    - name: Reject a foreign primary-GID sharing after account creation
+      block:
+        - name: Provide created service accounts and an operator sharing runner's primary GID
+          ansible.builtin.set_fact:
+            mcp_current_passwd_records:
+              mcp-runner: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+              mcp-tunnel: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+              operator: ["x", "2001", "1001", "", "/home/operator", "/bin/sh"]
+            mcp_current_group_records:
+              mcp-runner: ["x", "1001", []]
+              mcp-tunnel: ["x", "1002", []]
+            mcp_current_runner_passwd: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_current_tunnel_passwd: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_current_runner_group: ["x", "1001", []]
+            mcp_current_tunnel_group: ["x", "1002", []]
+            mcp_runner_groups:
+              stdout: "1001"
+            mcp_tunnel_groups:
+              stdout: "1002"
+
+        - name: Run production post-creation assertions and fact derivation
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_created_identities.yml
+      rescue:
+        - name: Record expected foreign primary-GID rejection after creation
+          ansible.builtin.set_fact:
+            test_created_primary_gid_sharing_rejected: true
+
+    - name: Confirm foreign primary-GID sharing was rejected after creation
+      ansible.builtin.assert:
+        that:
+          - test_created_primary_gid_sharing_rejected | default(false)
 
     - name: Reject a writable source checkout path
       block:
