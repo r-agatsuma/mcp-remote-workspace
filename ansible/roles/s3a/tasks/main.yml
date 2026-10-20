@@ -1,0 +1,223 @@
+---
+- name: Require the canonical target platform
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == "Ubuntu"
+      - ansible_distribution_version == "24.04"
+      - ansible_architecture in ["aarch64", "arm64"]
+    fail_msg: "S3A supports Ubuntu 24.04 on arm64 only."
+
+- name: Require an immutable application source revision
+  ansible.builtin.assert:
+    that:
+      - mcp_source_revision is match('^[0-9a-fA-F]{40}$')
+    fail_msg: "Set mcp_source_revision to the exact 40-character Git commit to deploy."
+
+- name: Install distro-provided Git and Go bootstrap
+  ansible.builtin.apt:
+    name:
+      - git
+      - golang-go
+      - binutils
+    state: present
+    update_cache: true
+
+- name: Create the mcp-runner service account
+  ansible.builtin.user:
+    name: "{{ mcp_runner_user }}"
+    system: true
+    create_home: false
+    home: /nonexistent
+    shell: /usr/sbin/nologin
+    password_lock: true
+    groups: ""
+    append: false
+    state: present
+
+- name: Create the mcp-tunnel service account
+  ansible.builtin.user:
+    name: "{{ mcp_tunnel_user }}"
+    system: true
+    create_home: false
+    home: /nonexistent
+    shell: /usr/sbin/nologin
+    password_lock: true
+    groups: ""
+    append: false
+    state: present
+
+- name: Read the created mcp-runner account record
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ mcp_runner_user }}"
+    fail_key: true
+
+- name: Expose the actual mcp-runner UID and primary GID
+  ansible.builtin.set_fact:
+    mcp_runner_uid: "{{ ansible_facts.getent_passwd[mcp_runner_user][1] | int }}"
+    mcp_runner_primary_gid: "{{ ansible_facts.getent_passwd[mcp_runner_user][2] | int }}"
+
+- name: Read the created mcp-tunnel account record
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ mcp_tunnel_user }}"
+    fail_key: true
+
+- name: Expose the created service account names for downstream roles
+  ansible.builtin.set_fact:
+    mcp_runner_account: "{{ mcp_runner_user }}"
+    mcp_tunnel_account: "{{ mcp_tunnel_user }}"
+
+- name: Check out the exact application source revision
+  ansible.builtin.git:
+    repo: https://github.com/r-agatsuma/mcp-remote-workspace.git
+    dest: "{{ mcp_source_path }}"
+    version: "{{ mcp_source_revision }}"
+    update: true
+    force: false
+    accept_hostkey: false
+
+- name: Read the checked out application revision
+  ansible.builtin.command:
+    argv:
+      - git
+      - rev-parse
+      - HEAD
+  args:
+    chdir: "{{ mcp_source_path }}"
+  register: mcp_checked_out_revision
+  changed_when: false
+
+- name: Require the checked out revision to match the requested commit
+  ansible.builtin.assert:
+    that:
+      - mcp_checked_out_revision.stdout == (mcp_source_revision | lower)
+    fail_msg: "The checkout does not match mcp_source_revision."
+
+- name: Inspect the checked out source tree for modifications
+  ansible.builtin.command:
+    argv:
+      - git
+      - status
+      - --porcelain
+  args:
+    chdir: "{{ mcp_source_path }}"
+  register: mcp_source_status
+  changed_when: false
+
+- name: Require an unmodified application source tree
+  ansible.builtin.assert:
+    that:
+      - mcp_source_status.stdout == ""
+    fail_msg: "The application checkout contains modifications; refusing to build it."
+
+- name: Record checked out source revision
+  ansible.builtin.debug:
+    var: mcp_checked_out_revision.stdout
+
+- name: Verify module checksums with the selected Go toolchain
+  ansible.builtin.command:
+    argv:
+      - go
+      - mod
+      - verify
+  args:
+    chdir: "{{ mcp_source_path }}"
+  environment:
+    GOTOOLCHAIN: "{{ mcp_go_toolchain }}"
+  register: mcp_go_mod_verify
+  changed_when: false
+
+- name: Record module verification result
+  ansible.builtin.debug:
+    var: mcp_go_mod_verify.stdout
+
+- name: Record selected Go toolchain
+  ansible.builtin.command:
+    argv:
+      - go
+      - version
+  args:
+    chdir: "{{ mcp_source_path }}"
+  environment:
+    GOTOOLCHAIN: "{{ mcp_go_toolchain }}"
+  register: mcp_go_version
+  changed_when: false
+  failed_when: mcp_go_version.stdout is not match('^go version go1[.]26[.]9([ ]|$)')
+
+- name: Record selected Go toolchain version
+  ansible.builtin.debug:
+    var: mcp_go_version.stdout
+
+- name: Record the exact application source revision
+  ansible.builtin.debug:
+    var: mcp_source_revision
+
+- name: Build mcp-workspaced from the checked out source
+  ansible.builtin.command:
+    argv:
+      - go
+      - build
+      - -trimpath
+      - -o
+      - "{{ mcp_source_path }}/mcp-workspaced"
+      - ./cmd/mcp-workspaced
+  args:
+    chdir: "{{ mcp_source_path }}"
+  environment:
+    GOTOOLCHAIN: "{{ mcp_go_toolchain }}"
+  register: mcp_build
+
+- name: Inspect build metadata in the produced binary
+  ansible.builtin.command:
+    argv:
+      - go
+      - version
+      - -m
+      - "{{ mcp_source_path }}/mcp-workspaced"
+  args:
+    chdir: "{{ mcp_source_path }}"
+  environment:
+    GOTOOLCHAIN: "{{ mcp_go_toolchain }}"
+  register: mcp_binary_metadata
+  changed_when: false
+
+- name: Record binary build metadata
+  ansible.builtin.debug:
+    var: mcp_binary_metadata.stdout_lines
+
+- name: Inspect the produced binary program headers and dynamic entries
+  ansible.builtin.command:
+    argv:
+      - readelf
+      - -lWd
+      - "{{ mcp_source_path }}/mcp-workspaced"
+  register: mcp_binary_linkage
+  changed_when: false
+
+- name: Record binary program headers and dynamic entries
+  ansible.builtin.debug:
+    var: mcp_binary_linkage.stdout_lines
+
+- name: Inspect the install directory ownership and write permissions
+  ansible.builtin.stat:
+    path: /usr/local/bin
+  register: mcp_install_directory
+
+- name: Require a root-owned install directory not writable by service accounts
+  ansible.builtin.assert:
+    that:
+      - mcp_install_directory.stat.isdir
+      - mcp_install_directory.stat.pw_name == "root"
+      - mcp_install_directory.stat.mode is not search('[2367][0-7]$')
+      - mcp_install_directory.stat.mode[-1] in ['0', '1', '4', '5']
+    fail_msg: "/usr/local/bin must be root-owned and not group/world writable."
+
+- name: Install the root-owned application executable
+  ansible.builtin.copy:
+    src: "{{ mcp_source_path }}/mcp-workspaced"
+    dest: /usr/local/bin/mcp-workspaced
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"

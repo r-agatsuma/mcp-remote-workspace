@@ -1,0 +1,7 @@
+---
+mcp_source_revision: REPLACE_WITH_40_HEX_COMMIT
+
+mcp_runner_user: mcp-runner
+mcp_tunnel_user: mcp-tunnel
+mcp_source_path: /usr/local/src/mcp-workspaced
+mcp_go_toolchain: go1.26.9
