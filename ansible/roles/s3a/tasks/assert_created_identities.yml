@@ -1,0 +1,50 @@
+---
+- name: Require distinct non-root service UIDs and primary GIDs
+  ansible.builtin.assert:
+    that:
+      - mcp_current_runner_passwd | length > 2
+      - mcp_current_tunnel_passwd | length > 2
+      - (mcp_current_runner_passwd[1] | int) > 0
+      - (mcp_current_tunnel_passwd[1] | int) > 0
+      - (mcp_current_runner_passwd[2] | int) > 0
+      - (mcp_current_tunnel_passwd[2] | int) > 0
+      - mcp_current_runner_passwd[1] != mcp_current_tunnel_passwd[1]
+      - mcp_current_runner_passwd[2] != mcp_current_tunnel_passwd[2]
+      - mcp_current_runner_group | length > 1
+      - mcp_current_tunnel_group | length > 1
+      - mcp_current_runner_group[2] | length == 0
+      - mcp_current_tunnel_group[2] | length == 0
+      - mcp_current_runner_group[1] == mcp_current_runner_passwd[2]
+      - mcp_current_tunnel_group[1] == mcp_current_tunnel_passwd[2]
+      - >-
+        (mcp_current_passwd_records | dict2items
+         | rejectattr('key', 'equalto', mcp_runner_user)
+         | selectattr('value.1', 'equalto', mcp_current_runner_passwd[1])
+         | list | length == 0)
+      - >-
+        (mcp_current_passwd_records | dict2items
+         | rejectattr('key', 'equalto', mcp_tunnel_user)
+         | selectattr('value.1', 'equalto', mcp_current_tunnel_passwd[1])
+         | list | length == 0)
+      - >-
+        (mcp_current_group_records | dict2items
+         | rejectattr('key', 'equalto', mcp_runner_user)
+         | selectattr('value.1', 'equalto', mcp_current_runner_passwd[2])
+         | list | length == 0)
+      - >-
+        (mcp_current_group_records | dict2items
+         | rejectattr('key', 'equalto', mcp_tunnel_user)
+         | selectattr('value.1', 'equalto', mcp_current_tunnel_passwd[2])
+         | list | length == 0)
+      - mcp_runner_groups.stdout.split() | length == 1
+      - (mcp_runner_groups.stdout.split()[0] | int) == (mcp_current_runner_passwd[2] | int)
+      - mcp_tunnel_groups.stdout.split() | length == 1
+      - (mcp_tunnel_groups.stdout.split()[0] | int) == (mcp_current_tunnel_passwd[2] | int)
+    fail_msg: "Created service accounts violate UID/GID separation or non-privileged group membership."
+
+- name: Expose verified actual mcp-runner UID and primary GID
+  ansible.builtin.set_fact:
+    mcp_runner_uid: "{{ mcp_current_runner_passwd[1] | int }}"
+    mcp_runner_primary_gid: "{{ mcp_current_runner_passwd[2] | int }}"
+    mcp_runner_account: "{{ mcp_runner_user }}"
+    mcp_tunnel_account: "{{ mcp_tunnel_user }}"

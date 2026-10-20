@@ -1,0 +1,55 @@
+---
+- name: Validate source-tree entry owners and modes
+  ansible.builtin.include_tasks: assert_source_entries.yml
+
+- name: Require source paths to be non-writable by mcp-runner
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/test
+      - "!"
+      - -w
+      - "{{ item }}"
+  become_user: "{{ mcp_runner_user }}"
+  register: mcp_runner_source_access
+  changed_when: false
+  loop: "{{ mcp_source_access_paths }}"
+  loop_control:
+    label: "mcp-runner: {{ item }}"
+
+- name: Require source paths to be non-writable by mcp-tunnel
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/test
+      - "!"
+      - -w
+      - "{{ item }}"
+  become_user: "{{ mcp_tunnel_user }}"
+  register: mcp_tunnel_source_access
+  changed_when: false
+  loop: "{{ mcp_source_access_paths }}"
+  loop_control:
+    label: "mcp-tunnel: {{ item }}"
+
+- name: Require the source tree to be non-writable by mcp-runner
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/find
+      - "{{ mcp_source_path }}"
+      - -writable
+      - -print
+  become_user: "{{ mcp_runner_user }}"
+  register: mcp_runner_writable_source
+  changed_when: false
+  failed_when: mcp_runner_writable_source.stdout != ""
+
+- name: Require the source tree to be non-writable by mcp-tunnel
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/find
+      - "{{ mcp_source_path }}"
+      - -writable
+      - -print
+  become_user: "{{ mcp_tunnel_user }}"
+  register: mcp_tunnel_writable_source
+  changed_when: false
+  failed_when: mcp_tunnel_writable_source.stdout != ""

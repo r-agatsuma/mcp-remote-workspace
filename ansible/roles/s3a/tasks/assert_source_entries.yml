@@ -1,0 +1,13 @@
+---
+- name: Require root ownership and non-writable modes for every source-tree entry
+  ansible.builtin.assert:
+    that:
+      - item.pw_name == "root"
+      - item.isdir or item.isreg
+      - not item.islnk
+      - item.mode is not search('[2367][0-7]$')
+      - item.mode[-1] in ['0', '1', '4', '5']
+    fail_msg: "Build source entry {{ item.path }} is linked, writable, or not root-owned."
+  loop: "{{ mcp_source_tree_entries }}"
+  loop_control:
+    label: "{{ item.path }}"

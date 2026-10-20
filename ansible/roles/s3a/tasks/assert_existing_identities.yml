@@ -1,0 +1,65 @@
+---
+- name: Require the canonical, distinct service account names
+  ansible.builtin.assert:
+    that:
+      - mcp_runner_user == "mcp-runner"
+      - mcp_tunnel_user == "mcp-tunnel"
+      - mcp_runner_user != mcp_tunnel_user
+    fail_msg: "S3A service account names are fixed to mcp-runner and mcp-tunnel."
+
+- name: Reject privileged or colliding pre-existing service identities
+  ansible.builtin.assert:
+    that:
+      - mcp_existing_runner_passwd | length == 0 or (mcp_existing_runner_passwd[1] | int) != 0
+      - mcp_existing_tunnel_passwd | length == 0 or (mcp_existing_tunnel_passwd[1] | int) != 0
+      - mcp_existing_runner_passwd | length == 0 or (mcp_existing_runner_passwd[2] | int) != 0
+      - mcp_existing_tunnel_passwd | length == 0 or (mcp_existing_tunnel_passwd[2] | int) != 0
+      - mcp_existing_runner_passwd | length == 0 or mcp_existing_runner_group | length > 1
+      - mcp_existing_tunnel_passwd | length == 0 or mcp_existing_tunnel_group | length > 1
+      - mcp_existing_runner_passwd | length == 0 or (mcp_existing_runner_passwd[2] | int) == (mcp_existing_runner_group[1] | int)
+      - mcp_existing_tunnel_passwd | length == 0 or (mcp_existing_tunnel_passwd[2] | int) == (mcp_existing_tunnel_group[1] | int)
+      - mcp_existing_runner_group | length == 0 or (mcp_existing_runner_group[1] | int) != 0
+      - mcp_existing_tunnel_group | length == 0 or (mcp_existing_tunnel_group[1] | int) != 0
+      - mcp_existing_runner_group | length == 0 or mcp_existing_runner_group[2] | length == 0
+      - mcp_existing_tunnel_group | length == 0 or mcp_existing_tunnel_group[2] | length == 0
+      - mcp_existing_runner_passwd | length == 0 or mcp_existing_tunnel_passwd | length == 0 or mcp_existing_runner_passwd[1] != mcp_existing_tunnel_passwd[1]
+      - mcp_existing_runner_passwd | length == 0 or mcp_existing_tunnel_passwd | length == 0 or mcp_existing_runner_passwd[2] != mcp_existing_tunnel_passwd[2]
+      - >-
+        mcp_existing_runner_passwd | length == 0 or
+        (mcp_preexisting_passwd_records | dict2items
+         | rejectattr('key', 'equalto', mcp_runner_user)
+         | selectattr('value.1', 'equalto', mcp_existing_runner_passwd[1])
+         | list | length == 0)
+      - >-
+        mcp_existing_tunnel_passwd | length == 0 or
+        (mcp_preexisting_passwd_records | dict2items
+         | rejectattr('key', 'equalto', mcp_tunnel_user)
+         | selectattr('value.1', 'equalto', mcp_existing_tunnel_passwd[1])
+         | list | length == 0)
+      - >-
+        mcp_existing_runner_group | length == 0 or
+        (mcp_preexisting_group_records | dict2items
+         | rejectattr('key', 'equalto', mcp_runner_user)
+         | selectattr('value.1', 'equalto', mcp_existing_runner_group[1])
+         | list | length == 0)
+      - >-
+        mcp_existing_tunnel_group | length == 0 or
+        (mcp_preexisting_group_records | dict2items
+         | rejectattr('key', 'equalto', mcp_tunnel_user)
+         | selectattr('value.1', 'equalto', mcp_existing_tunnel_group[1])
+         | list | length == 0)
+      - >-
+        mcp_existing_runner_passwd | length == 0 or
+        (mcp_preexisting_group_records | dict2items
+         | rejectattr('key', 'equalto', mcp_runner_user)
+         | selectattr('value.2', 'contains', mcp_runner_user)
+         | list | length == 0)
+      - >-
+        mcp_existing_tunnel_passwd | length == 0 or
+        (mcp_preexisting_group_records | dict2items
+         | rejectattr('key', 'equalto', mcp_tunnel_user)
+         | selectattr('value.2', 'contains', mcp_tunnel_user)
+         | list | length == 0)
+    fail_msg: >-
+      A pre-existing S3A account or private group is privileged, shared, or
+      inconsistent. No UID/GID reassignment was attempted.
