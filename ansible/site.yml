@@ -1,0 +1,7 @@
+---
+- name: Establish S3A deployment foundation and install mcp-workspaced
+  hosts: mcp_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - s3a

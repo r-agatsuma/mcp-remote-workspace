@@ -1,0 +1,358 @@
+---
+- name: Exercise S3A revision assertions with synthetic local facts
+  hosts: localhost
+  gather_facts: false
+  vars:
+    mcp_runner_user: mcp-runner
+    mcp_tunnel_user: mcp-tunnel
+    mcp_source_path: /usr/local/src/mcp-workspaced
+  tasks:
+    - name: Initialize synthetic existing-account records
+      ansible.builtin.set_fact:
+        mcp_preexisting_passwd_records: {}
+        mcp_preexisting_group_records: {}
+        mcp_existing_runner_passwd: []
+        mcp_existing_tunnel_passwd: []
+        mcp_existing_runner_group: []
+        mcp_existing_tunnel_group: []
+
+    - name: Reject a noncanonical account-name override
+      block:
+        - name: Set an invalid account name
+          ansible.builtin.set_fact:
+            mcp_runner_user: runner-override
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+      rescue:
+        - name: Record expected account-name rejection
+          ansible.builtin.set_fact:
+            test_invalid_name_rejected: true
+
+    - name: Confirm account-name override was rejected
+      ansible.builtin.assert:
+        that:
+          - test_invalid_name_rejected | default(false)
+
+    - name: Restore canonical account names
+      ansible.builtin.set_fact:
+        mcp_runner_user: mcp-runner
+        mcp_tunnel_user: mcp-tunnel
+
+    - name: Accept compliant pre-existing separated identities
+      block:
+        - name: Provide compliant existing account and private-group records
+          ansible.builtin.set_fact:
+            mcp_existing_runner_passwd: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_tunnel_passwd: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_runner_group: ["x", "1001", ""]
+            mcp_existing_tunnel_group: ["x", "1002", ""]
+            mcp_preexisting_passwd_records:
+              mcp-runner: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+              mcp-tunnel: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_preexisting_group_records:
+              mcp-runner: ["x", "1001", ""]
+              mcp-tunnel: ["x", "1002", ""]
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+
+        - name: Record compliant existing identity acceptance
+          ansible.builtin.set_fact:
+            test_compliant_existing_identities_accepted: true
+
+    - name: Confirm compliant existing identities pass pre-mutation checks
+      ansible.builtin.assert:
+        that:
+          - test_compliant_existing_identities_accepted | default(false)
+
+    - name: Reject a pre-existing root identity
+      block:
+        - name: Provide a privileged existing runner record
+          ansible.builtin.set_fact:
+            mcp_existing_runner_passwd: ["x", "0", "0", "", "/root", "/bin/sh"]
+            mcp_existing_runner_group: ["x", "0", []]
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+      rescue:
+        - name: Record expected privileged-identity rejection
+          ansible.builtin.set_fact:
+            test_privileged_identity_rejected: true
+
+    - name: Confirm privileged identity was rejected
+      ansible.builtin.assert:
+        that:
+          - test_privileged_identity_rejected | default(false)
+
+    - name: Reject pre-existing runner/tunnel UID collision
+      block:
+        - name: Provide colliding existing account records
+          ansible.builtin.set_fact:
+            mcp_existing_runner_passwd: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_tunnel_passwd: ["x", "1001", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_runner_group: ["x", "1001", []]
+            mcp_existing_tunnel_group: ["x", "1002", []]
+            mcp_preexisting_passwd_records:
+              mcp-runner: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+              mcp-tunnel: ["x", "1001", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_preexisting_group_records:
+              mcp-runner: ["x", "1001", []]
+              mcp-tunnel: ["x", "1002", []]
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+      rescue:
+        - name: Record expected UID-collision rejection
+          ansible.builtin.set_fact:
+            test_uid_collision_rejected: true
+
+    - name: Confirm pre-existing UID collision was rejected
+      ansible.builtin.assert:
+        that:
+          - test_uid_collision_rejected | default(false)
+
+    - name: Reject a foreign primary-GID sharing before mutation
+      block:
+        - name: Provide service accounts and an operator sharing runner's primary GID
+          ansible.builtin.set_fact:
+            mcp_existing_runner_passwd: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_tunnel_passwd: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_runner_group: ["x", "1001", []]
+            mcp_existing_tunnel_group: ["x", "1002", []]
+            mcp_preexisting_passwd_records:
+              mcp-runner: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+              mcp-tunnel: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+              operator: ["x", "2001", "1001", "", "/home/operator", "/bin/sh"]
+            mcp_preexisting_group_records:
+              mcp-runner: ["x", "1001", []]
+              mcp-tunnel: ["x", "1002", []]
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+      rescue:
+        - name: Record expected foreign primary-GID rejection before mutation
+          ansible.builtin.set_fact:
+            test_preexisting_primary_gid_sharing_rejected: true
+
+    - name: Confirm foreign primary-GID sharing was rejected before mutation
+      ansible.builtin.assert:
+        that:
+          - test_preexisting_primary_gid_sharing_rejected | default(false)
+
+    - name: Reject a foreign primary-GID sharing when the service user is absent
+      block:
+        - name: Provide an existing runner group, no runner user, and a sharing operator
+          ansible.builtin.set_fact:
+            mcp_existing_runner_passwd: []
+            mcp_existing_tunnel_passwd: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_runner_group: ["x", "1001", []]
+            mcp_existing_tunnel_group: ["x", "1002", []]
+            mcp_preexisting_passwd_records:
+              mcp-tunnel: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+              operator: ["x", "2001", "1001", "", "/home/operator", "/bin/sh"]
+            mcp_preexisting_group_records:
+              mcp-runner: ["x", "1001", []]
+              mcp-tunnel: ["x", "1002", []]
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+      rescue:
+        - name: Record expected rejection for an existing group without its user
+          ansible.builtin.set_fact:
+            test_absent_service_user_gid_sharing_rejected: true
+
+    - name: Confirm sharing was rejected when the service user was absent
+      ansible.builtin.assert:
+        that:
+          - test_absent_service_user_gid_sharing_rejected | default(false)
+
+    - name: Reject a supplementary-group member before mutation
+      block:
+        - name: Provide a pre-existing supplementary membership
+          ansible.builtin.set_fact:
+            mcp_existing_runner_passwd: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_existing_tunnel_passwd: []
+            mcp_existing_runner_group: ["x", "1001", ""]
+            mcp_existing_tunnel_group: []
+            mcp_preexisting_passwd_records:
+              mcp-runner: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_preexisting_group_records:
+              mcp-runner: ["x", "1001", ""]
+              operations: ["x", "1003", "mcp-runner"]
+
+        - name: Run the production pre-mutation assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_existing_identities.yml
+      rescue:
+        - name: Record expected supplementary-membership rejection
+          ansible.builtin.set_fact:
+            test_supplementary_group_rejected: true
+
+    - name: Confirm pre-existing supplementary membership was rejected
+      ansible.builtin.assert:
+        that:
+          - test_supplementary_group_rejected | default(false)
+
+    - name: Provide compliant created-account records
+      ansible.builtin.set_fact:
+        mcp_current_passwd_records:
+          mcp-runner: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+          mcp-tunnel: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+        mcp_current_group_records:
+          mcp-runner: ["x", "1001", []]
+          mcp-tunnel: ["x", "1002", []]
+        mcp_current_runner_passwd: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+        mcp_current_tunnel_passwd: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+        mcp_current_runner_group: ["x", "1001", []]
+        mcp_current_tunnel_group: ["x", "1002", []]
+        mcp_runner_groups:
+          stdout: "1001"
+        mcp_tunnel_groups:
+          stdout: "1002"
+
+    - name: Run production post-creation assertions and fact derivation
+      ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_created_identities.yml
+
+    - name: Confirm facts came from compliant actual records
+      ansible.builtin.assert:
+        that:
+          - mcp_runner_uid | int == 1001
+          - mcp_runner_primary_gid | int == 1001
+
+    - name: Reject a foreign primary-GID sharing after account creation
+      block:
+        - name: Provide created service accounts and an operator sharing runner's primary GID
+          ansible.builtin.set_fact:
+            mcp_current_passwd_records:
+              mcp-runner: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+              mcp-tunnel: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+              operator: ["x", "2001", "1001", "", "/home/operator", "/bin/sh"]
+            mcp_current_group_records:
+              mcp-runner: ["x", "1001", []]
+              mcp-tunnel: ["x", "1002", []]
+            mcp_current_runner_passwd: ["x", "1001", "1001", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_current_tunnel_passwd: ["x", "1002", "1002", "", "/nonexistent", "/usr/sbin/nologin"]
+            mcp_current_runner_group: ["x", "1001", []]
+            mcp_current_tunnel_group: ["x", "1002", []]
+            mcp_runner_groups:
+              stdout: "1001"
+            mcp_tunnel_groups:
+              stdout: "1002"
+
+        - name: Run production post-creation assertions and fact derivation
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_created_identities.yml
+      rescue:
+        - name: Record expected foreign primary-GID rejection after creation
+          ansible.builtin.set_fact:
+            test_created_primary_gid_sharing_rejected: true
+
+    - name: Confirm foreign primary-GID sharing was rejected after creation
+      ansible.builtin.assert:
+        that:
+          - test_created_primary_gid_sharing_rejected | default(false)
+
+    - name: Reject a writable source checkout path
+      block:
+        - name: Provide source-path stat records with an unsafe checkout mode
+          ansible.builtin.set_fact:
+            mcp_source_path_stats:
+              results:
+                - item: /
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0755"}
+                - item: /usr
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0755"}
+                - item: /usr/local
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0755"}
+                - item: /usr/local/src
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0755"}
+                - item: /usr/local/src/mcp-workspaced
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0777"}
+
+        - name: Run production source-path trust assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_source_paths.yml
+      rescue:
+        - name: Record expected unsafe-source rejection
+          ansible.builtin.set_fact:
+            test_unsafe_source_rejected: true
+
+    - name: Confirm writable source path was rejected
+      ansible.builtin.assert:
+        that:
+          - test_unsafe_source_rejected | default(false)
+
+    - name: Reject a non-root-owned source checkout path
+      block:
+        - name: Provide source-path stat records with an unsafe checkout owner
+          ansible.builtin.set_fact:
+            mcp_source_path_stats:
+              results:
+                - item: /
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0755"}
+                - item: /usr
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0755"}
+                - item: /usr/local
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0755"}
+                - item: /usr/local/src
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: root, mode: "0755"}
+                - item: /usr/local/src/mcp-workspaced
+                  stat: {exists: true, isdir: true, islnk: false, pw_name: mcp-runner, mode: "0755"}
+
+        - name: Run production source-path trust assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_source_paths.yml
+      rescue:
+        - name: Record expected unsafe-owner rejection
+          ansible.builtin.set_fact:
+            test_unsafe_owner_rejected: true
+
+    - name: Confirm non-root-owned source path was rejected
+      ansible.builtin.assert:
+        that:
+          - test_unsafe_owner_rejected | default(false)
+
+    - name: Reject a writable source-tree file
+      block:
+        - name: Provide a group-writable source-tree file
+          ansible.builtin.set_fact:
+            mcp_source_tree_entries:
+              - path: /usr/local/src/mcp-workspaced/cmd/unsafe.go
+                pw_name: root
+                isdir: false
+                isreg: true
+                islnk: false
+                mode: "0664"
+
+        - name: Run production source-entry assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_source_entries.yml
+      rescue:
+        - name: Record expected writable-entry rejection
+          ansible.builtin.set_fact:
+            test_writable_entry_rejected: true
+
+    - name: Confirm writable source-tree entry was rejected
+      ansible.builtin.assert:
+        that:
+          - test_writable_entry_rejected | default(false)
+
+    - name: Reject a service-owned source-tree file
+      block:
+        - name: Provide a service-owned source-tree file
+          ansible.builtin.set_fact:
+            mcp_source_tree_entries:
+              - path: /usr/local/src/mcp-workspaced/cmd/unsafe.go
+                pw_name: mcp-runner
+                isdir: false
+                isreg: true
+                islnk: false
+                mode: "0644"
+
+        - name: Run production source-entry assertions
+          ansible.builtin.include_tasks: ../roles/s3a/tasks/assert_source_entries.yml
+      rescue:
+        - name: Record expected unsafe-entry-owner rejection
+          ansible.builtin.set_fact:
+            test_service_owned_entry_rejected: true
+
+    - name: Confirm service-owned source-tree entry was rejected
+      ansible.builtin.assert:
+        that:
+          - test_service_owned_entry_rejected | default(false)

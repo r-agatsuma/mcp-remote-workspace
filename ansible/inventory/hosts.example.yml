@@ -1,0 +1,7 @@
+all:
+  children:
+    mcp_hosts:
+      hosts:
+        ubuntu2404_arm64_example:
+          ansible_host: 192.0.2.10
+          ansible_user: REPLACE_WITH_OPERATOR_ACCOUNT

@@ -1,0 +1,42 @@
+---
+- name: Require the existing root path prefixes to be protected
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isdir
+      - not item.stat.islnk
+      - item.stat.pw_name == "root"
+      - item.stat.mode is not search('[2367][0-7]$')
+      - item.stat.mode[-1] in ['0', '1', '4', '5']
+    fail_msg: "Source parent {{ item.item }} is absent, linked, writable, or not root-owned."
+  loop: "{{ mcp_source_path_stats.results[:3] }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Require an existing source checkout path to be a protected directory
+  ansible.builtin.assert:
+    that:
+      - item.stat.isdir
+      - not item.stat.islnk
+      - item.stat.pw_name == "root"
+      - item.stat.mode is not search('[2367][0-7]$')
+      - item.stat.mode[-1] in ['0', '1', '4', '5']
+    fail_msg: "Existing source path {{ item.item }} is linked, writable, or not root-owned."
+  loop: "{{ mcp_source_path_stats.results[-1:] }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
+
+- name: Require an existing source parent to be a protected directory
+  ansible.builtin.assert:
+    that:
+      - item.stat.isdir
+      - not item.stat.islnk
+      - item.stat.pw_name == "root"
+      - item.stat.mode is not search('[2367][0-7]$')
+      - item.stat.mode[-1] in ['0', '1', '4', '5']
+    fail_msg: "Existing source parent {{ item.item }} is linked, writable, or not root-owned."
+  loop: "{{ mcp_source_path_stats.results[3:4] }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists

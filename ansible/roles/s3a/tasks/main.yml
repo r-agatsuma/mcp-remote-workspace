@@ -1,0 +1,409 @@
+---
+- name: Require the canonical target platform
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == "Ubuntu"
+      - ansible_distribution_version == "24.04"
+      - ansible_architecture in ["aarch64", "arm64"]
+    fail_msg: "S3A supports Ubuntu 24.04 on arm64 only."
+
+- name: Require an immutable application source revision
+  ansible.builtin.assert:
+    that:
+      - mcp_source_revision is match('^[0-9a-fA-F]{40}$')
+    fail_msg: "Set mcp_source_revision to the exact 40-character Git commit to deploy."
+
+- name: Require the canonical source checkout path
+  ansible.builtin.assert:
+    that:
+      - mcp_source_path == "/usr/local/src/mcp-workspaced"
+    fail_msg: "S3A source checkout path is fixed to /usr/local/src/mcp-workspaced."
+
+- name: Read all existing passwd identities before mutation
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Read all existing group identities before mutation
+  ansible.builtin.getent:
+    database: group
+
+- name: Record pre-existing service account and group identities
+  ansible.builtin.set_fact:
+    mcp_preexisting_passwd_records: "{{ ansible_facts.getent_passwd }}"
+    mcp_preexisting_group_records: "{{ ansible_facts.getent_group }}"
+    mcp_existing_runner_passwd: "{{ ansible_facts.getent_passwd.get(mcp_runner_user, []) }}"
+    mcp_existing_tunnel_passwd: "{{ ansible_facts.getent_passwd.get(mcp_tunnel_user, []) }}"
+    mcp_existing_runner_group: "{{ ansible_facts.getent_group.get(mcp_runner_user, []) }}"
+    mcp_existing_tunnel_group: "{{ ansible_facts.getent_group.get(mcp_tunnel_user, []) }}"
+
+- name: Validate pre-existing service identities before mutation
+  ansible.builtin.include_tasks: assert_existing_identities.yml
+
+- name: Install distro-provided Git and Go bootstrap
+  ansible.builtin.apt:
+    name:
+      - git
+      - golang-go
+      - binutils
+    state: present
+    update_cache: true
+
+- name: Create the mcp-runner service account
+  ansible.builtin.user:
+    name: "{{ mcp_runner_user }}"
+    system: true
+    create_home: false
+    home: /nonexistent
+    shell: /usr/sbin/nologin
+    password_lock: true
+    groups: ""
+    append: false
+    state: present
+
+- name: Create the mcp-tunnel service account
+  ansible.builtin.user:
+    name: "{{ mcp_tunnel_user }}"
+    system: true
+    create_home: false
+    home: /nonexistent
+    shell: /usr/sbin/nologin
+    password_lock: true
+    groups: ""
+    append: false
+    state: present
+
+- name: Read created service account records
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Read the created private groups
+  ansible.builtin.getent:
+    database: group
+
+- name: Record authoritative created service account records
+  ansible.builtin.set_fact:
+    mcp_current_passwd_records: "{{ ansible_facts.getent_passwd }}"
+    mcp_current_group_records: "{{ ansible_facts.getent_group }}"
+    mcp_current_runner_passwd: "{{ ansible_facts.getent_passwd.get(mcp_runner_user, []) }}"
+    mcp_current_tunnel_passwd: "{{ ansible_facts.getent_passwd.get(mcp_tunnel_user, []) }}"
+    mcp_current_runner_group: "{{ ansible_facts.getent_group.get(mcp_runner_user, []) }}"
+    mcp_current_tunnel_group: "{{ ansible_facts.getent_group.get(mcp_tunnel_user, []) }}"
+
+- name: Read actual runner supplementary groups
+  ansible.builtin.command:
+    argv:
+      - id
+      - -G
+      - "{{ mcp_runner_user }}"
+  register: mcp_runner_groups
+  changed_when: false
+
+- name: Read actual tunnel supplementary groups
+  ansible.builtin.command:
+    argv:
+      - id
+      - -G
+      - "{{ mcp_tunnel_user }}"
+  register: mcp_tunnel_groups
+  changed_when: false
+
+- name: Validate created account identities and expose downstream facts
+  ansible.builtin.include_tasks: assert_created_identities.yml
+
+- name: Inspect existing source path and protected parents before checkout
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /
+    - /usr
+    - /usr/local
+    - /usr/local/src
+    - "{{ mcp_source_path }}"
+  register: mcp_source_path_stats
+
+- name: Check existing source-prefix ownership before creating a missing parent
+  ansible.builtin.include_tasks: assert_source_paths.yml
+
+- name: Create the source parent only when it is absent
+  ansible.builtin.file:
+    path: /usr/local/src
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: not mcp_source_path_stats.results[3].stat.exists
+
+- name: Reinspect source path after ensuring the required parent exists
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /
+    - /usr
+    - /usr/local
+    - /usr/local/src
+    - "{{ mcp_source_path }}"
+  register: mcp_source_path_stats
+
+- name: Require source parent paths to exist before checkout
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: "Required source parent {{ item.item }} is absent."
+  loop: "{{ mcp_source_path_stats.results[:-1] }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Validate source path ownership and modes before invoking Git
+  ansible.builtin.include_tasks: assert_source_paths.yml
+
+- name: Find source-tree entries if a checkout already exists
+  ansible.builtin.find:
+    paths: "{{ mcp_source_path }}"
+    recurse: true
+    hidden: true
+    file_type: any
+  register: mcp_source_tree
+  when: mcp_source_path_stats.results[-1].stat.exists
+
+- name: Combine pre-existing source-tree entries
+  ansible.builtin.set_fact:
+    mcp_source_tree_entries: "{{ mcp_source_tree.files }}"
+  when: mcp_source_path_stats.results[-1].stat.exists
+
+- name: Set paths whose effective writability must be checked
+  ansible.builtin.set_fact:
+    mcp_source_access_paths: >-
+      {{ mcp_source_path_stats.results
+         | selectattr('stat.exists')
+         | map(attribute='item') | list }}
+
+- name: Validate source checkout trust before invoking Git
+  ansible.builtin.include_tasks: assert_source_tree.yml
+  when: mcp_source_path_stats.results[-1].stat.exists
+
+- name: Require source parents to be non-writable by mcp-runner
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/test
+      - "!"
+      - -w
+      - "{{ item.item }}"
+  become_user: "{{ mcp_runner_user }}"
+  changed_when: false
+  loop: "{{ mcp_source_path_stats.results[:-1] | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "mcp-runner: {{ item.item }}"
+
+- name: Require source parents to be non-writable by mcp-tunnel
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/test
+      - "!"
+      - -w
+      - "{{ item.item }}"
+  become_user: "{{ mcp_tunnel_user }}"
+  changed_when: false
+  loop: "{{ mcp_source_path_stats.results[:-1] | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "mcp-tunnel: {{ item.item }}"
+
+- name: Check out the exact application source revision
+  ansible.builtin.git:
+    repo: https://github.com/r-agatsuma/mcp-remote-workspace.git
+    dest: "{{ mcp_source_path }}"
+    version: "{{ mcp_source_revision }}"
+    update: true
+    force: false
+    accept_hostkey: false
+
+- name: Inspect source checkout and parents after Git checkout
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /
+    - /usr
+    - /usr/local
+    - /usr/local/src
+    - "{{ mcp_source_path }}"
+  register: mcp_source_path_stats
+
+- name: Validate source path ownership and modes before building
+  ansible.builtin.include_tasks: assert_source_paths.yml
+
+- name: Require source parent paths to remain present before build
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: "Required source parent {{ item.item }} is absent."
+  loop: "{{ mcp_source_path_stats.results[:-1] }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Inspect all checked out source-tree entries
+  ansible.builtin.find:
+    paths: "{{ mcp_source_path }}"
+    recurse: true
+    hidden: true
+    file_type: any
+  register: mcp_source_tree
+
+- name: Combine checked out source-tree entries
+  ansible.builtin.set_fact:
+    mcp_source_tree_entries: "{{ mcp_source_tree.files }}"
+
+- name: Set protected source paths for effective access checks
+  ansible.builtin.set_fact:
+    mcp_source_access_paths: >-
+      {{ mcp_source_path_stats.results
+         | map(attribute='item') | list }}
+
+- name: Validate source checkout trust before building
+  ansible.builtin.include_tasks: assert_source_tree.yml
+
+- name: Read the checked out application revision
+  ansible.builtin.command:
+    argv:
+      - git
+      - rev-parse
+      - HEAD
+  args:
+    chdir: "{{ mcp_source_path }}"
+  register: mcp_checked_out_revision
+  changed_when: false
+
+- name: Require the checked out revision to match the requested commit
+  ansible.builtin.assert:
+    that:
+      - mcp_checked_out_revision.stdout == (mcp_source_revision | lower)
+    fail_msg: "The checkout does not match mcp_source_revision."
+
+- name: Inspect the checked out source tree for modifications
+  ansible.builtin.command:
+    argv:
+      - git
+      - status
+      - --porcelain
+  args:
+    chdir: "{{ mcp_source_path }}"
+  register: mcp_source_status
+  changed_when: false
+
+- name: Require an unmodified application source tree
+  ansible.builtin.assert:
+    that:
+      - mcp_source_status.stdout == ""
+    fail_msg: "The application checkout contains modifications; refusing to build it."
+
+- name: Record checked out source revision
+  ansible.builtin.debug:
+    var: mcp_checked_out_revision.stdout
+
+- name: Verify module checksums with the selected Go toolchain
+  ansible.builtin.command:
+    argv:
+      - go
+      - mod
+      - verify
+  args:
+    chdir: "{{ mcp_source_path }}"
+  environment:
+    GOTOOLCHAIN: "{{ mcp_go_toolchain }}"
+  register: mcp_go_mod_verify
+  changed_when: false
+
+- name: Record module verification result
+  ansible.builtin.debug:
+    var: mcp_go_mod_verify.stdout
+
+- name: Record selected Go toolchain
+  ansible.builtin.command:
+    argv:
+      - go
+      - version
+  args:
+    chdir: "{{ mcp_source_path }}"
+  environment:
+    GOTOOLCHAIN: "{{ mcp_go_toolchain }}"
+  register: mcp_go_version
+  changed_when: false
+  failed_when: mcp_go_version.stdout is not match('^go version go1[.]26[.]9([ ]|$)')
+
+- name: Record selected Go toolchain version
+  ansible.builtin.debug:
+    var: mcp_go_version.stdout
+
+- name: Record the exact application source revision
+  ansible.builtin.debug:
+    var: mcp_source_revision
+
+- name: Build mcp-workspaced from the checked out source
+  ansible.builtin.command:
+    argv:
+      - go
+      - build
+      - -trimpath
+      - -o
+      - "{{ mcp_source_path }}/mcp-workspaced"
+      - ./cmd/mcp-workspaced
+  args:
+    chdir: "{{ mcp_source_path }}"
+  environment:
+    GOTOOLCHAIN: "{{ mcp_go_toolchain }}"
+  register: mcp_build
+
+- name: Inspect build metadata in the produced binary
+  ansible.builtin.command:
+    argv:
+      - go
+      - version
+      - -m
+      - "{{ mcp_source_path }}/mcp-workspaced"
+  args:
+    chdir: "{{ mcp_source_path }}"
+  environment:
+    GOTOOLCHAIN: "{{ mcp_go_toolchain }}"
+  register: mcp_binary_metadata
+  changed_when: false
+
+- name: Record binary build metadata
+  ansible.builtin.debug:
+    var: mcp_binary_metadata.stdout_lines
+
+- name: Inspect the produced binary program headers and dynamic entries
+  ansible.builtin.command:
+    argv:
+      - readelf
+      - -lWd
+      - "{{ mcp_source_path }}/mcp-workspaced"
+  register: mcp_binary_linkage
+  changed_when: false
+
+- name: Record binary program headers and dynamic entries
+  ansible.builtin.debug:
+    var: mcp_binary_linkage.stdout_lines
+
+- name: Inspect the install directory ownership and write permissions
+  ansible.builtin.stat:
+    path: /usr/local/bin
+  register: mcp_install_directory
+
+- name: Require a root-owned install directory not writable by service accounts
+  ansible.builtin.assert:
+    that:
+      - mcp_install_directory.stat.isdir
+      - mcp_install_directory.stat.pw_name == "root"
+      - mcp_install_directory.stat.mode is not search('[2367][0-7]$')
+      - mcp_install_directory.stat.mode[-1] in ['0', '1', '4', '5']
+    fail_msg: "/usr/local/bin must be root-owned and not group/world writable."
+
+- name: Install the root-owned application executable
+  ansible.builtin.copy:
+    src: "{{ mcp_source_path }}/mcp-workspaced"
+    dest: /usr/local/bin/mcp-workspaced
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
