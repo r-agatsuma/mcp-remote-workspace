@@ -26,3 +26,10 @@ mcp_data_uuid: REPLACE_WITH_BOOTSTRAP_RESULT_UUID
 mcp_runner_subuid_start: 0
 mcp_runner_subgid_start: 0
 mcp_runner_subid_count: 65536
+
+# S3D trusted ordered literal resolver inputs. Empty deliberately fails closed.
+# No production resolver IP is an architecture default.
+mcp_public_dns: []
+# All host public addresses, including provider NAT/floating addresses that are
+# not assigned to a NIC. Interface-local addresses are also denied dynamically.
+mcp_host_public_ips: []

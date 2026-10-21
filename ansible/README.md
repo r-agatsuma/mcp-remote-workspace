@@ -1,11 +1,12 @@
-# S3 deployment source (S3A + S3B + S3C)
+# S3 deployment source (S3A + S3B + S3C + S3D)
 
 This tree targets Ubuntu 24.04 on arm64. It creates the unprivileged
 `mcp-runner` and `mcp-tunnel` system accounts, then installs the application
 from an explicitly selected repository commit. S3B adds the verified Data mount
 and rootless runtime placement described below. S3C provisions the unattended
-user manager and checks its cgroup authority. Network policy, production services
-and Tunnel wiring remain later slices.
+user manager and checks its cgroup authority. S3D adds the root-owned persistent
+destination policy and direct trusted resolver view. Production services and
+Tunnel wiring remain later slices.
 
 Before a deployment, copy `inventory/hosts.example.yml` and replace its
 documentation-only address and operator account. Set `mcp_source_revision` in
@@ -66,7 +67,7 @@ checks do not prove host convergence or runtime behavior.
 
 ## S3B Data and rootless runtime contract
 
-`site.yml` runs S3A, S3B, then S3C. It never imports `bootstrap-data.yml`, the
+`site.yml` runs S3A, S3B, S3C, then S3D. It never imports `bootstrap-data.yml`, the
 `data_bootstrap` role or `mcp_data_bootstrap` module. Ordinary convergence
 contains no partition/format/signature-erasure/tune/repair action. The shared
 inspector invokes `wipefs --no-act --json` only to read signatures. Missing,
@@ -331,3 +332,115 @@ Actual boot/logout availability, user bus operation, controller delegation,
 transient-parent creation/stopping, OCI ancestry/effective limits and pressure /
 saturation/control survival remain unverified real-host behavior at this Author
 checkpoint. Independent source review is still required.
+
+## S3D host destination policy and trusted DNS
+
+S3D consumes `mcp_runner_uid` and `mcp_runner_primary_gid` from S3A, then compares
+both with `pwd.getpwnam('mcp-runner')` at planning time. It never allocates or
+reassigns identities. Supply these root/operator-owned inventory inputs:
+
+| Input | Contract |
+| --- | --- |
+| `mcp_public_dns` | Ordered list of 1–3 distinct native public-routable literal IPs; no hostnames, zones, mapped IPv6 or fallback |
+| `mcp_host_public_ips` | Complete list of the dedicated host's public IPs, including provider NAT/floating addresses absent from NICs; 1–64 distinct public literals |
+
+Both example lists are empty and intentionally fail. No resolver is a compiled
+or example deployment default. Reconcile the host list whenever provider address
+assignments change. Actual interface addresses are additionally denied through
+Netfilter's `addrtype LOCAL`, independent of inventory; a resolver matching a
+listed or currently assigned host address is rejected. These lists are trusted
+deployment state, never workspace/Dockerfile input.
+
+The transient read-only Ansible planner validates inputs, snapshots
+`iptables-nft-save` / `ip6tables-nft-save`, and composes `/etc/iptables/rules.v4`
+and `rules.v6`. Each filter table gets exactly one marked numeric-UID OUTPUT hook
+before existing OUTPUT rules, and one reserved `MCP_S3D_OUTPUT` chain. Host/self
+and destination DROP rules precede the chain's terminal ACCEPT. IPv4 route-type
+broadcast destinations are also denied, including directed broadcasts. There is no
+early established-connection, DNS, gateway, protocol or port exception. Public
+TCP/UDP/ICMP/ICMPv6 are not restricted by a protocol whitelist. No port is
+published, no host network privilege is granted, and pasta remains connectivity
+and translation only.
+
+IPv4 exclusions include this-network, RFC1918, CGNAT, loopback, link-local,
+protocol-assignment, documentation, deprecated relay, benchmark, multicast and
+reserved ranges, plus the public-numbered Azure platform VIP. OCI metadata and
+provider resolvers fall within link-local; other represented metadata classes
+include shared space and IPv6 ULA. IPv6 requires native `2000::/3`, excludes
+Teredo, benchmark, ORCHID, documentation, 6to4 and the non-public remainder of
+IANA's protocol-assignment block. Globally reachable protocol suballocations
+permitted by the current runtime contract remain public; they get no early
+ACCEPT. The same classification validates DNS and renders DROP prefixes, so
+being a resolver cannot override a prohibited destination. Classification is
+explicit in `module_utils/mcp_network.py`, independent of controller/host Python
+`is_global` table versions. It retains current `build_dns.go` exclusions and
+additionally rejects the platform VIP and IANA's non-public protocol remainder;
+application Go behavior is unchanged.
+
+Unrelated chain declarations, INPUT/FORWARD policies and rule order, other
+OUTPUT rules and other tables are retained; only packet counters and save-file
+comments are normalized. A successful empty live save on a fresh host has no
+explicit filter table, so the planner materializes its implicit ACCEPT baseline.
+An existing empty/incomplete persistent file is rejected. Unrelated live and
+persistent policy must agree before either file is written. Drift, reserved-chain
+collisions, legacy policy, unexpected persistence plugins or competing active /
+boot-enabled firewall services fail rather than being overwritten. Provisioning
+must have exclusive control of the firewall during convergence; this is not a
+coordinator for concurrent root/operator rule writers.
+
+The role installs Noble `iptables=1.8.10-*`, `iptables-persistent=1.0.20` and
+`netfilter-persistent=1.0.20` without installer autosave, package removal or
+service activation. Generic persistence executables must already resolve to
+the nft variants; the role does not switch alternatives. Both rendered families
+undergo `*-nft-restore --test` before persistence writes at deployment time.
+Only `netfilter-persistent start` loads the rules, with its boot service enabled.
+The loader defaults disable additive/no-flush restore and stop-time flushing.
+Every owned setting is written once; comments and save-control settings are
+preserved, while unknown/non-declarative shell configuration fails. The plugin's
+optional test mode is disabled because it returns success on parser failure;
+the planner explicitly tests both families and restore errors propagate. Failure
+can leave partial convergence and is never converted into success or a fallback.
+
+`/etc/sysctl.d/99-mcp-network.conf` contains exactly
+`net.ipv4.ping_group_range = <actual primary GID> <actual primary GID>` as
+root:root 0644. Only that key is applied through systemd-sysctl's effective
+configuration; a conflicting effective override is rejected by reading the key
+back. No raw-socket capability or wider group range is added.
+
+The host resolver implementation is one root-owned 0644 regular
+`/etc/resolv.conf`, with only the validated ordered `nameserver` values. A known
+systemd-resolved symlink is replaced atomically, without changing its generated
+target. The planner requires the existing NSS `hosts: files dns` path, refusing
+alternate NSS resolver modules rather than changing host NSS policy. Thus the
+selected host/Podman path reads direct upstreams instead of the stub or a DHCP
+provider list. This supported external-management mode is an Ubuntu mechanism,
+not an architecture invariant. It does not reconfigure systemd-resolved's D-Bus
+clients, add a daemon, promise cache behavior or force untrusted public DNS/DoH
+exclusivity. There is no resolved.conf DNS list that could diverge from inventory.
+
+`mcp_public_dns_validated` exports the normalized, validated list in operator
+order for later S3E repeated `-public-dns` arguments. Both it and the host file
+come from the same planner result derived from `mcp_public_dns`. S3D does not
+render daemon arguments, service/Tunnel/recovery units, provider policy or any
+S3E/S3F implementation. Existing namespaces may retain stale resolver views;
+their lifecycle and real-runtime propagation remain later integration work.
+
+Material mechanism references:
+
+- [Ubuntu Noble resolved resolver-file modes and NSS interfaces](https://manpages.ubuntu.com/manpages/noble/man8/systemd-resolved.service.8.html)
+- [Ubuntu Noble iptables extensions: owner and addrtype](https://manpages.ubuntu.com/manpages/noble/man8/iptables-extensions.8.html)
+- [Upstream iptables 1.8.10 source](https://www.netfilter.org/projects/iptables/files/iptables-1.8.10.tar.xz): restore's double-quote parser is not shell quoting; preserve existing rule text
+- [Noble persistence package version](https://packages.ubuntu.com/source/noble/iptables-persistent) and its [IPv4](https://sources.debian.org/src/iptables-persistent/1.0.20/plugins/15-ip4tables/) / [IPv6 loader source](https://sources.debian.org/src/iptables-persistent/1.0.20/plugins/25-ip6tables/)
+- [IANA IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry) / [IPv6 special-purpose registries](https://www.iana.org/assignments/iana-ipv6-special-registry)
+- [Azure platform VIP classification](https://learn.microsoft.com/en-us/azure/virtual-network/what-is-ip-address-168-63-129-16)
+
+`python3 -m unittest discover -s ansible/tests -p 'test_*.py' -v` includes pure
+input/rule-order/preservation/rerender tests, mocked read-only planner cases and
+a local Ansible fact-interface test with multiple synthetic identities. No test
+applies firewall/sysctl/resolver configuration. The strict synthetic rule
+interpreter is not the Netfilter parser or a packet test. The deployment parser
+calls above are encoded but require supported target tools and privileges.
+Actual filtering, pasta composition, workspace isolation, IPv6 routing, metadata
+blocking, reboot persistence, Podman/image-fetch DNS, cache and namespace
+behavior, daemon public-DNS runtime behavior and OCI E2E remain unverified at
+this Author/source checkpoint. Independent source review is a later checkpoint.

@@ -1,0 +1,234 @@
+"""Pure S3D input validation and iptables-save composition; no host mutations.
+
+Preserve current build_dns.go's native public resolver exclusions, plus explicit
+private/multicast, platform and IANA non-public protocol-assignment ranges.
+Do not use ipaddress.is_global: its special-use table varies by Python version.
+"""
+import ipaddress
+import re
+import shlex
+
+CHAIN = 'MCP_S3D_OUTPUT'
+MARKER = 'mcp-s3d-output-v1'
+DENY4 = (
+    '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
+    '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24',
+    '192.88.99.0/24', '192.168.0.0/16', '198.18.0.0/15',
+    '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4',
+    # Azure platform virtual IP: not ordinary public Internet or a DNS exception.
+    '168.63.129.16/32',
+)
+# Native public IPv6 is restricted to 2000::/3 before these exclusions.
+# This also denies unspecified/loopback, mapped IPv4, NAT64, discard, ULA,
+# deprecated site-local, link-local, multicast and unallocated address space.
+DENY6 = (
+    '2001::/32', '2001:2::/48', '2001:10::/28', '2001:20::/28',
+    '2001:db8::/32', '2002::/16', '3fff::/20',
+)
+# IANA's 2001::/23 parent is not globally reachable except more-specific
+# allocations. Retain the globally reachable allocations also permitted by the
+# current runtime contract. Generate only DROP prefixes for the remainder:
+# these are public address classifications, never DNS-specific ACCEPT rules.
+PUBLIC_PROTOCOL6 = ('2001:1::1/128', '2001:1::2/128', '2001:1::3/128',
+                    '2001:3::/32', '2001:4:112::/48', '2001:30::/28')
+
+
+def protocol_deny6():
+    remaining = [ipaddress.ip_network('2001::/23')]
+    for prefix in PUBLIC_PROTOCOL6:
+        allowed = ipaddress.ip_network(prefix)
+        remaining = [part for network in remaining
+                     for part in (network.address_exclude(allowed) if allowed.subnet_of(network) else [network])]
+    return tuple(str(network) for network in sorted(remaining))
+
+
+DENY6 = tuple(str(network) for network in ipaddress.collapse_addresses(
+    ipaddress.ip_network(prefix) for prefix in DENY6 + protocol_deny6()))
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError('STOP: ' + message)
+
+
+def identity(uid, gid):
+    require(type(uid) is int and 0 < uid < 2**31, 'invalid actual runner UID')
+    require(type(gid) is int and 0 < gid < 2**31, 'invalid actual primary GID')
+
+
+def literal(value):
+    require(isinstance(value, str) and '%' not in value, 'unscoped literal IP required')
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise ValueError('STOP: literal IP required') from exc
+    # Reject mapped addresses rather than letting family-dependent rendering
+    # select a different policy. No rewriting/fallback on invalid input.
+    require(not (address.version == 6 and address.ipv4_mapped), 'native literal IP required')
+    return address
+
+
+def public(address):
+    ranges = DENY4 if address.version == 4 else DENY6
+    return (address.version == 4 or address in ipaddress.ip_network('2000::/3')) and not any(
+        address in ipaddress.ip_network(prefix) for prefix in ranges)
+
+
+def public_list(values, minimum, maximum, name):
+    require(type(values) is list and minimum <= len(values) <= maximum, 'invalid ' + name + ' list length')
+    addresses = [literal(value) for value in values]
+    require(all(public(address) for address in addresses), 'prohibited ' + name + ' destination')
+    result = [str(address) for address in addresses]
+    require(len(set(result)) == len(result), 'duplicate ' + name + ' destination')
+    return result
+
+
+def inputs(uid, gid, resolvers, host_public_ips):
+    identity(uid, gid)
+    # The dedicated OCI host has public NAT addresses that need not appear on
+    # an interface. Inventory must enumerate them; addrtype LOCAL covers all
+    # currently assigned addresses independently, including later IPv6 changes.
+    hosts = public_list(host_public_ips, 1, 64, 'host public IP')
+    dns = public_list(resolvers, 1, 3, 'public resolver')
+    require(not set(dns).intersection(hosts), 'resolver is the host itself')
+    return dns, hosts
+
+
+def runner_rules(uid, family, hosts):
+    require(type(uid) is int and 0 < uid < 2**31, 'invalid actual runner UID')
+    require(family in (4, 6), 'invalid address family')
+    start = f'-A OUTPUT -m owner --uid-owner {uid} -m comment --comment {MARKER} -j {CHAIN}'
+    rules = [f'-A {CHAIN} -m addrtype --dst-type LOCAL -j DROP']
+    if family == 4:
+        # Directed broadcasts depend on assigned interface prefixes, not only
+        # the fixed 255.255.255.255 limited-broadcast address.
+        rules.append(f'-A {CHAIN} -m addrtype --dst-type BROADCAST -j DROP')
+    if family == 6:
+        rules.append(f'-A {CHAIN} ! -d 2000::/3 -j DROP')
+    for prefix in (DENY4 if family == 4 else DENY6):
+        rules.append(f'-A {CHAIN} -d {prefix} -j DROP')
+    for host in hosts:
+        address = literal(host)
+        if address.version == family:
+            rules.append(f'-A {CHAIN} -d {address}/{address.max_prefixlen} -j DROP')
+    # All deny decisions precede this family-neutral public protocol allowance.
+    # No ESTABLISHED, DNS, loopback, gateway or port-specific shortcut exists.
+    rules.append(f'-A {CHAIN} -j ACCEPT')
+    return start, rules
+
+
+def parse_save(source):
+    """Accept only declarative save syntax; restore --test is the host parser.
+
+    Counters/comments are deliberately excluded from the semantic comparison.
+    Unrelated declarations and rule ordering are retained, including other tables.
+    """
+    tables = {}
+    current = None
+    for raw in source.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('*'):
+            require(current is None and re.fullmatch(r'\*[a-z]+', line), 'malformed table')
+            current = line[1:]
+            require(current not in tables, 'duplicate table')
+            tables[current] = []
+        elif line == 'COMMIT':
+            require(current is not None, 'unexpected COMMIT')
+            current = None
+        else:
+            require(current is not None, 'rule outside table')
+            if line.startswith(':'):
+                require(re.fullmatch(r':[A-Za-z0-9_.:+-]+ (ACCEPT|DROP|-) \[\d+:\d+\]', line), 'invalid chain declaration')
+                line = re.sub(r'\[\d+:\d+\]$', '[0:0]', line)
+            else:
+                tokens = shlex.split(line)
+                require(len(tokens) >= 4 and tokens[0] == '-A', 'non-save command in rule file')
+                # Preserve the save grammar verbatim: restore is not a shell
+                # parser. In particular shlex.join would introduce single
+                # quotes around ! and comments, changing restore semantics.
+            tables[current].append(line)
+    require(current is None, 'incomplete rule file')
+    return tables
+
+
+def unowned(tables):
+    """Strip only the reserved S3D chain and its single marked OUTPUT hook."""
+    result = {table: list(lines) for table, lines in tables.items()}
+    lines = result.setdefault('filter', [':INPUT ACCEPT [0:0]', ':FORWARD ACCEPT [0:0]', ':OUTPUT ACCEPT [0:0]'])
+    declarations = [line for line in lines if line.startswith(':' + CHAIN + ' ')]
+    refs = [line for line in lines if not line.startswith(':') and CHAIN in shlex.split(line)]
+    if declarations or refs:
+        require(declarations == [f':{CHAIN} - [0:0]'], 'reserved chain collision')
+        hooks = [line for line in refs if shlex.split(line)[1] != CHAIN]
+        require(len(hooks) == 1 and re.fullmatch(
+            rf'-A OUTPUT -m owner --uid-owner [1-9][0-9]* -m comment --comment {MARKER} -j {CHAIN}', hooks[0]),
+            'foreign reference to reserved chain')
+    kept = [line for line in lines if line not in declarations and line not in refs]
+    for chain in ('INPUT', 'FORWARD', 'OUTPUT'):
+        require(len([line for line in kept if line.startswith(':' + chain + ' ')]) == 1,
+                'incomplete filter built-in chains')
+    require(len([line.split()[0] for line in kept if line.startswith(':')]) ==
+            len(set(line.split()[0] for line in kept if line.startswith(':'))), 'duplicate chain')
+    result['filter'] = kept
+    # Another table referencing the reserved name is never owned by this slice.
+    require(not any(CHAIN in shlex.split(line) or line.startswith(':' + CHAIN + ' ')
+                    for table, values in result.items() if table != 'filter' for line in values),
+            'reserved chain outside filter')
+    return result
+
+
+def render_rules(live, persistent, uid, family, hosts):
+    base = unowned(parse_save(live))
+    if persistent is not None:
+        parsed = parse_save(persistent)
+        require(bool(parsed), 'empty persistent rule file')
+        require(base == unowned(parsed), 'live/persistent unrelated policy differs; operator reconciliation required')
+    hook, owned = runner_rules(uid, family, hosts)
+    lines = base['filter']
+    declarations = [line for line in lines if line.startswith(':')]
+    rules = [line for line in lines if not line.startswith(':')]
+    # First OUTPUT rule: even an existing broad ACCEPT cannot bypass the boundary.
+    base['filter'] = declarations + [f':{CHAIN} - [0:0]', hook] + owned + rules
+    return ''.join('*' + table + '\n' + '\n'.join(values) + '\nCOMMIT\n'
+                   for table, values in base.items())
+
+
+def direct_resolv_conf(resolvers):
+    dns = public_list(resolvers, 1, 3, 'public resolver')
+    return '# Managed by S3D: deployment-owned direct resolver view.\n' + ''.join(
+        'nameserver ' + address + '\n' for address in dns)
+
+
+def ping_sysctl(uid, gid):
+    identity(uid, gid)
+    return f'net.ipv4.ping_group_range = {gid} {gid}\n'
+
+
+def persistence_defaults(source):
+    """Compose the loader's shell assignments without executable overrides.
+
+    Replace every owned assignment, including duplicate/exported forms. Keep
+    comments and the two unrelated save controls; refuse uninspectable shell
+    code/unknown configuration rather than executing it during provisioning.
+    """
+    owned = dict(FLUSH_ON_STOP='0', IPTABLES_RESTORE_NOFLUSH='no',
+                 IP6TABLES_RESTORE_NOFLUSH='no', IPTABLES_TEST_RULESET='no',
+                 IP6TABLES_TEST_RULESET='no')
+    kept = []
+    for line in (source or '').splitlines():
+        words = shlex.split(line, comments=True)
+        if not words:
+            kept.append(line)
+            continue
+        if words[0] == 'export':
+            words = words[1:]
+        require(len(words) == 1 and re.fullmatch(r'[A-Z][A-Z0-9_]*=[A-Za-z0-9_./:-]*', words[0]),
+                'non-declarative netfilter-persistent defaults')
+        key, _ = words[0].split('=', 1)
+        require(key in owned or key in ('IPTABLES_SKIP_SAVE', 'IP6TABLES_SKIP_SAVE'),
+                'unknown netfilter-persistent default: ' + key)
+        if key not in owned:
+            kept.append(line)
+    return '\n'.join(kept + [key + '=' + value for key, value in owned.items()]) + '\n'
