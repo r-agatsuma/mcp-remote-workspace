@@ -370,12 +370,17 @@ include shared space and IPv6 ULA. IPv6 requires native `2000::/3`, excludes
 Teredo, benchmark, ORCHID, documentation, 6to4 and the non-public remainder of
 IANA's protocol-assignment block. Globally reachable protocol suballocations
 permitted by the current runtime contract remain public; they get no early
-ACCEPT. The same classification validates DNS and renders DROP prefixes, so
-being a resolver cannot override a prohibited destination. Classification is
-explicit in `module_utils/mcp_network.py`, independent of controller/host Python
-`is_global` table versions. It retains current `build_dns.go` exclusions and
-additionally rejects the platform VIP and IANA's non-public protocol remainder;
-application Go behavior is unchanged.
+ACCEPT. General IPv4 egress uses finer DROP prefixes for `192.0.0.0/24` that
+leave IANA's globally reachable PCP `192.0.0.9/32` and TURN `192.0.0.10/32`
+eligible for the terminal public ACCEPT. Independent host/self, LOCAL/BROADCAST
+and platform denies still take precedence. Trusted resolver validation remains
+stricter and rejects the entire special-purpose `/24`, including `.9/.10`;
+egress eligibility does not make an address a trusted DNS default. The two
+IPv4 range sets share the other exclusions explicitly in
+`module_utils/mcp_network.py`, independent of controller/host Python `is_global`
+table versions. Trusted inputs retain current `build_dns.go` exclusions and
+additionally reject the platform VIP and IANA's non-public protocol remainder.
+IPv6 classification and application Go behavior are unchanged.
 
 Unrelated chain declarations, INPUT/FORWARD policies and rule order, other
 OUTPUT rules and other tables are retained; only packet counters and save-file

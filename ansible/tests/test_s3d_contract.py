@@ -96,6 +96,16 @@ def evaluate(rendered, address, uid, local=False, broadcast=False):
 
 
 class Inputs(unittest.TestCase):
+    def test_ipv4_protocol_anycast_is_not_a_trusted_dns_default(self):
+        # Egress eligibility does not imply deployment-default DNS eligibility.
+        # Keep the stricter #111 resolver contract, including PCP/TURN anycast.
+        for address in ['192.0.0.9', '192.0.0.10', '192.0.0.8', '192.0.0.170', '192.0.0.171']:
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError):
+                    network.inputs(947, 952, [address], HOSTS)
+                with self.assertRaises(ValueError):
+                    network.direct_resolv_conf([address])
+
     def test_ordered_public_literals_and_length_one_to_three(self):
         for count in [1, 2, 3]:
             self.assertEqual(network.inputs(947, 952, DNS[:count], HOSTS), (DNS[:count], HOSTS))
@@ -121,6 +131,42 @@ class Inputs(unittest.TestCase):
 
 
 class Rendering(unittest.TestCase):
+    def test_ipv4_protocol_suballocation_iana_oracle(self):
+        # Independent expected outcomes from IANA, not production prefix lists:
+        # https://www.iana.org/assignments/iana-ipv4-special-registry
+        # PCP .9 and TURN .10 are Globally Reachable=True more-specific entries;
+        # a blanket DROP of their non-public /24 parent is incorrect (P1-01).
+        cases = {
+            '192.0.0.9': 'ACCEPT', '192.0.0.10': 'ACCEPT',
+            '192.0.0.8': 'DROP', '192.0.0.170': 'DROP', '192.0.0.171': 'DROP',
+            '10.0.0.1': 'DROP', '169.254.0.2': 'DROP', '127.0.0.1': 'DROP',
+            '169.254.169.254': 'DROP', '168.63.129.16': 'DROP',
+            '192.0.2.1': 'DROP', '240.0.0.1': 'DROP', HOSTS[0]: 'DROP',
+        }
+        for uid in [947, 20481]:
+            rendered = network.render_rules(BASE, BASE, uid, 4, HOSTS)
+            for address, expected in cases.items():
+                with self.subTest(uid=uid, address=address):
+                    self.assertEqual(evaluate(rendered, address, uid), expected)
+            # Audit the complete remainder independently of its prefix encoding.
+            for last in range(256):
+                with self.subTest(uid=uid, last=last):
+                    expected = 'ACCEPT' if last in (9, 10) else 'DROP'
+                    self.assertEqual(evaluate(rendered, f'192.0.0.{last}', uid), expected)
+
+    def test_ipv4_protocol_anycast_cannot_bypass_independent_security_denies(self):
+        for address in ['192.0.0.9', '192.0.0.10']:
+            rendered = network.render_rules(BASE, BASE, 947, 4, HOSTS)
+            with self.subTest(address=address):
+                self.assertEqual(evaluate(rendered, address, 947, local=True), 'DROP')
+                self.assertEqual(evaluate(rendered, address, 947, broadcast=True), 'DROP')
+                host_rendered = network.render_rules(BASE, BASE, 947, 4, HOSTS + [address])
+                self.assertEqual(evaluate(host_rendered, address, 947), 'DROP')
+                owned = [shlex.split(line) for line in network.parse_save(host_rendered)['filter']
+                         if line.startswith('-A ' + network.CHAIN + ' ')]
+                self.assertEqual(owned[-1], ['-A', network.CHAIN, '-j', 'ACCEPT'])
+                self.assertTrue(all(rule[-2:] == ['-j', 'DROP'] for rule in owned[:-1]))
+
     def test_multiple_actual_identities_sysctl_and_rerun(self):
         for uid, gid in [(947, 952), (20481, 31002)]:
             for family in [4, 6]:

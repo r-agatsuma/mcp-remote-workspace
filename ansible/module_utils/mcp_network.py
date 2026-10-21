@@ -1,7 +1,7 @@
 """Pure S3D input validation and iptables-save composition; no host mutations.
 
-Preserve current build_dns.go's native public resolver exclusions, plus explicit
-private/multicast, platform and IANA non-public protocol-assignment ranges.
+Trusted inputs preserve current build_dns.go's native public resolver exclusions.
+General egress separately preserves globally reachable IPv4 suballocations.
 Do not use ipaddress.is_global: its special-use table varies by Python version.
 """
 import ipaddress
@@ -10,13 +10,22 @@ import shlex
 
 CHAIN = 'MCP_S3D_OUTPUT'
 MARKER = 'mcp-s3d-output-v1'
-DENY4 = (
+RESOLVER_DENY4 = (
     '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
     '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24',
     '192.88.99.0/24', '192.168.0.0/16', '198.18.0.0/15',
     '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4',
     # Azure platform virtual IP: not ordinary public Internet or a DNS exception.
     '168.63.129.16/32',
+)
+# IANA IPv4 special-purpose registry: PCP .9/32 and TURN .10/32 are globally
+# reachable despite their non-public 192.0.0.0/24 parent. Deny only the remainder
+# for general egress; trusted resolver defaults still reject the entire /24.
+# No early ACCEPT: independent LOCAL/BROADCAST/host/platform denies still win.
+# https://www.iana.org/assignments/iana-ipv4-special-registry
+EGRESS_DENY4 = tuple(prefix for prefix in RESOLVER_DENY4 if prefix != '192.0.0.0/24') + (
+    '192.0.0.0/29', '192.0.0.8/32', '192.0.0.11/32', '192.0.0.12/30',
+    '192.0.0.16/28', '192.0.0.32/27', '192.0.0.64/26', '192.0.0.128/25',
 )
 # Native public IPv6 is restricted to 2000::/3 before these exclusions.
 # This also denies unspecified/loopback, mapped IPv4, NAT64, discard, ULA,
@@ -69,7 +78,7 @@ def literal(value):
 
 
 def public(address):
-    ranges = DENY4 if address.version == 4 else DENY6
+    ranges = RESOLVER_DENY4 if address.version == 4 else DENY6
     return (address.version == 4 or address in ipaddress.ip_network('2000::/3')) and not any(
         address in ipaddress.ip_network(prefix) for prefix in ranges)
 
@@ -105,7 +114,7 @@ def runner_rules(uid, family, hosts):
         rules.append(f'-A {CHAIN} -m addrtype --dst-type BROADCAST -j DROP')
     if family == 6:
         rules.append(f'-A {CHAIN} ! -d 2000::/3 -j DROP')
-    for prefix in (DENY4 if family == 4 else DENY6):
+    for prefix in (EGRESS_DENY4 if family == 4 else DENY6):
         rules.append(f'-A {CHAIN} -d {prefix} -j DROP')
     for host in hosts:
         address = literal(host)
