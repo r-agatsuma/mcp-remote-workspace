@@ -82,6 +82,91 @@ revision を理由に unrelated redesign や追加実装を行わない。
 
 finding を解消するために新しい Human-owned decision が必要なら STOP して返す。
 
+## GitHub-native review handoff
+
+Pull Request を対象とする implementation / review / revision cycle では、
+GitHub 上の PR state を persistent な review / remediation handoff として使用する。
+
+通常の artifact 対応は次とする。
+
+- GitHub Issue: implementation の durable task contract
+- Pull Request: review 対象の candidate
+- top-level PR conversation comment: review / re-review の Executable Task Contract
+- native GitHub Pull Request Review: independent verifier の disposition
+- inline review thread: 具体的 finding と remediation discussion
+- commit SHA: review / re-review の immutable boundary
+- CI / check status: supporting execution evidence
+
+PR review の task contract は、必要に応じて少なくとも次を明示する。
+
+- review type
+- authoritative Issue / artifact
+- target PR
+- exact target HEAD SHA
+- review scope と out-of-scope
+- acceptance / finding criteria
+- required output / disposition
+
+independent reviewer は、bounded な authority と review instruction に基づいて
+native GitHub Pull Request Review を提出する。
+
+通常の disposition は `APPROVE` または `REQUEST_CHANGES` とし、
+approval gate が目的でない場合に限り `COMMENT` を使用できる。
+
+review disposition は、実際に review した commit SHA に bind される。
+review 後に PR HEAD が変わった場合、以前の review はその reviewed SHA に対する
+evidence として残るが、新しい HEAD の landing disposition には自動的にならない。
+
+implementation agent は自己承認しない。
+implementation と independent verification の role は分離する。
+
+`REQUEST_CHANGES` を受けた revision では、implementation agent は GitHub 上の
+submitted review と relevant review thread を読み、authorized finding だけを修正する。
+必要に応じて relevant thread に remediation と resulting commit SHA を返信し、
+top-level PR conversation comment に少なくとも次を記録する。
+
+- new HEAD SHA
+- addressed findings
+- validation / tests
+- remaining blocker / STOP state
+
+revision task は、必要な finding / authority が GitHub 上に表現可能である限り、
+未提示の chat transcript や未参照の local review file を探索しなければ実行できない
+状態にしない。
+
+外部 artifact が本当に必要な場合は、open-ended に探索させず、
+revision task contract から explicit かつ bounded に参照する。
+
+differential re-review では、top-level PR conversation comment の task contract に
+必要に応じて次を明示する。
+
+- previous reviewed SHA
+- current target HEAD SHA
+- prior findings to close
+- differential review scope
+- acceptance / finding criteria
+- required disposition
+
+independent reviewer はその bounded delta を review し、current target SHA に bind された
+新しい native Pull Request Review を提出する。
+
+review cycle の state は、可能な限り GitHub 上の durable facts から導出する。
+
+- current PR HEAD SHA
+- applicable independent review と reviewed SHA
+- unresolved review threads
+- latest implementation-completion comment
+- CI / check status
+
+labels は UI 補助として使用してよいが、authoritative workflow state にしない。
+
+native `APPROVE` は exact reviewed SHA に対する verifier disposition であり、
+それ自体は merge authorization ではない。
+landing は Human / coordinator の別判断とし、landing 前に candidate HEAD が
+accepted review の reviewed SHA と一致することを確認する。
+別 policy が明示的に許可しない限り、HEAD drift がある状態で以前の approval を
+新しい HEAD に転用しない。
+
 ## Workspace isolation
 
 source、configuration、documentation を変更する task は、作業開始前に isolated Git worktree を使用する。
