@@ -1,0 +1,23 @@
+---
+- name: Require the actual S3A identity and S3B runtime environment
+  ansible.builtin.assert:
+    that:
+      - mcp_runner_account == 'mcp-runner'
+      - mcp_runner_uid | int > 0
+      - mcp_runner_primary_gid | int > 0
+      - mcp_runtime_environment.XDG_RUNTIME_DIR == '/run/user/' + (mcp_runner_uid | string)
+    fail_msg: 'STOP: S3C requires the verified S3A identity and matching S3B runtime directory.'
+
+- name: Derive the conventional user-manager authority and bus interface
+  ansible.builtin.set_fact:
+    mcp_user_manager_unit: "user@{{ mcp_runner_uid }}.service"
+    mcp_user_runtime_unit: "user-runtime-dir@{{ mcp_runner_uid }}.service"
+    mcp_user_manager_cgroup: "/user.slice/user-{{ mcp_runner_uid }}.slice/user@{{ mcp_runner_uid }}.service"
+    mcp_user_manager_environment:
+      XDG_RUNTIME_DIR: "/run/user/{{ mcp_runner_uid }}"
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ mcp_runner_uid }}/bus"
+    mcp_user_manager_required_controllers: [cpu, memory, pids]
+
+- name: Expose the complete explicit launch environment for S3E and control commands
+  ansible.builtin.set_fact:
+    mcp_service_environment: "{{ mcp_runtime_environment | combine(mcp_user_manager_environment) }}"

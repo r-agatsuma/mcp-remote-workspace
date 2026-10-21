@@ -1,8 +1,9 @@
 ---
-- name: Establish deployment foundation, Data and rootless runtime
+- name: Establish deployment foundation, Data, rootless runtime and user manager
   hosts: mcp_hosts
   become: true
   gather_facts: true
   roles:
     - s3a
     - s3b
+    - s3c

@@ -1,0 +1,110 @@
+---
+- name: Derive the downstream interface from verified predecessor facts
+  ansible.builtin.import_tasks: interface.yml
+
+- name: Install the supported Ubuntu user-manager prerequisites
+  ansible.builtin.apt:
+    name:
+      - systemd=255.4-*
+      - libpam-systemd=255.4-*
+    state: present
+    update_cache: true
+    allow_downgrade: false
+    install_recommends: false
+
+- name: Inspect the cgroup filesystem type without modifying its hierarchy
+  ansible.builtin.command:
+    argv: [/usr/bin/stat, -f, --format=%T, /sys/fs/cgroup]
+  register: mcp_cgroup_filesystem
+  changed_when: false
+
+- name: Require the unified cgroup-v2 authority
+  ansible.builtin.assert:
+    that:
+      - mcp_cgroup_filesystem.stdout == 'cgroup2fs'
+    fail_msg: 'STOP: S3C requires cgroup v2; it does not change host cgroup architecture.'
+
+- name: Read the host cgroup-v2 controller availability
+  ansible.builtin.slurp:
+    src: /sys/fs/cgroup/cgroup.controllers
+  register: mcp_host_controllers
+
+- name: Require all source-owned build controllers before user-manager provisioning
+  ansible.builtin.assert:
+    that:
+      - mcp_user_manager_required_controllers | difference((mcp_host_controllers.content | b64decode).split()) | length == 0
+    fail_msg: 'STOP: cpu, memory and pids must be available through the existing cgroup-v2 authority.'
+
+# Linger is the Ubuntu implementation of unattended availability, not a product
+# invariant. Only loginctl writes its persistent marker; no login shell is used.
+- name: Provision unattended user-manager availability across boot and logout
+  ansible.builtin.command:
+    argv: [/usr/bin/loginctl, --no-ask-password, enable-linger, "{{ mcp_runner_account }}"]
+    creates: "/var/lib/systemd/linger/{{ mcp_runner_account }}"
+
+- name: Start the existing distribution user manager without an interactive login
+  ansible.builtin.systemd_service:
+    name: "{{ mcp_user_manager_unit }}"
+    state: started
+
+- name: Read the user-manager properties after activation
+  ansible.builtin.systemd_service:
+    name: "{{ mcp_user_manager_unit }}"
+  register: mcp_user_manager
+
+- name: Verify the persistent unattended configuration through logind
+  ansible.builtin.command:
+    argv: [/usr/bin/loginctl, show-user, "{{ mcp_runner_account }}", --property=Linger, --value]
+  register: mcp_runner_linger
+  changed_when: false
+
+- name: Check the existing manager authority before addressing user units
+  ansible.builtin.import_tasks: assert_manager.yml
+
+- name: Read controllers actually available below the existing user manager
+  ansible.builtin.slurp:
+    src: "/sys/fs/cgroup{{ mcp_user_manager_cgroup }}/cgroup.controllers"
+  become_user: "{{ mcp_runner_account }}"
+  register: mcp_user_controllers
+
+- name: Require the controller interface below the accepted user-manager authority
+  ansible.builtin.assert:
+    that:
+      - mcp_user_manager_required_controllers | difference((mcp_user_controllers.content | b64decode).split()) | length == 0
+    fail_msg: 'STOP: required controllers are unavailable below user@UID.service; no privileged or cgroupfs fallback is permitted.'
+
+- name: Ensure the distribution user bus socket starts now and with the user manager
+  ansible.builtin.systemd_service:
+    name: dbus.socket
+    scope: user
+    enabled: true
+    state: started
+  become_user: "{{ mcp_runner_account }}"
+  environment: "{{ mcp_service_environment }}"
+
+- name: Inspect the systemd-owned runtime directory and user bus socket
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ mcp_user_manager_environment.XDG_RUNTIME_DIR }}"
+    - "{{ mcp_user_manager_environment.XDG_RUNTIME_DIR }}/bus"
+  register: mcp_user_runtime_paths
+
+- name: Address the user manager through the explicit service environment
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, --user, show, --property=ControlGroup, --value, --, '-.slice']
+  become_user: "{{ mcp_runner_account }}"
+  environment: "{{ mcp_service_environment }}"
+  register: mcp_user_root_cgroup
+  changed_when: false
+
+- name: Verify the source-required systemd-run executable
+  ansible.builtin.command:
+    argv: [/usr/bin/systemd-run, --version]
+  become_user: "{{ mcp_runner_account }}"
+  environment: "{{ mcp_service_environment }}"
+  changed_when: false
+
+- name: Verify the runtime and bus interface for later service execution
+  ansible.builtin.import_tasks: assert_interface.yml

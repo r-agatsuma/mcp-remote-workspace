@@ -1,10 +1,11 @@
-# S3 deployment source (S3A + S3B)
+# S3 deployment source (S3A + S3B + S3C)
 
 This tree targets Ubuntu 24.04 on arm64. It creates the unprivileged
 `mcp-runner` and `mcp-tunnel` system accounts, then installs the application
 from an explicitly selected repository commit. S3B adds the verified Data mount
-and rootless runtime placement described below. User-manager/cgroup authority,
-network policy, production services and Tunnel wiring remain later slices.
+and rootless runtime placement described below. S3C provisions the unattended
+user manager and checks its cgroup authority. Network policy, production services
+and Tunnel wiring remain later slices.
 
 Before a deployment, copy `inventory/hosts.example.yml` and replace its
 documentation-only address and operator account. Set `mcp_source_revision` in
@@ -65,7 +66,7 @@ checks do not prove host convergence or runtime behavior.
 
 ## S3B Data and rootless runtime contract
 
-`site.yml` runs S3A then S3B. It never imports `bootstrap-data.yml`, the
+`site.yml` runs S3A, S3B, then S3C. It never imports `bootstrap-data.yml`, the
 `data_bootstrap` role or `mcp_data_bootstrap` module. Ordinary convergence
 contains no partition/format/signature-erasure/tune/repair action. The shared
 inspector invokes `wipefs --no-act --json` only to read signatures. Missing,
@@ -257,3 +258,76 @@ evidence, UUID/reserve mismatch and no retry after failure. The tests never open
 block devices, run mkfs, contact a target, or claim real formatting/mount/reboot,
 rootless overlay, Podman/Buildah store alignment/NamespaceOptions, user-manager,
 network or end-to-end PASS. Those remain environment-dependent later evidence.
+
+## S3C unattended user-manager contract
+
+S3C consumes the verified S3A `mcp_runner_account`, `mcp_runner_uid` and
+`mcp_runner_primary_gid` facts and S3B `mcp_runtime_environment`. It installs the
+Ubuntu 24.04 `systemd` / `libpam-systemd` `255.4-*` prerequisites; S3B already
+installs `dbus-user-session`. No package repository or Go dependency is added.
+
+On this platform, `loginctl --no-ask-password enable-linger mcp-runner` is the
+smallest supported persistent boot/logout mechanism: logind starts the user
+manager at boot and keeps it after logout, without any interactive login.
+Only loginctl creates its persistent marker; reruns skip that command when the
+marker exists and verify `loginctl show-user ... --property=Linger --value`.
+S3C also explicitly starts the distribution `user@<actual UID>.service` now.
+It keeps the account's locked password and nologin shell. The invariant is
+**unattended mcp-runner user-manager availability**; linger is this Ubuntu
+implementation, not a universal architecture requirement. See the
+[systemd 255 loginctl documentation](https://www.freedesktop.org/software/systemd/man/255/loginctl.html).
+
+The standard [systemd 255 user-manager unit](https://github.com/systemd/systemd/blob/v255/units/user%40.service.in)
+delegates `pids memory cpu`. S3C checks the loaded unit's `Delegate=yes`,
+`DelegateControllers`, actual numeric `User`, active state and exact ControlGroup
+instead of adding an override, helper, daemon or second cgroup authority.
+It requires a unified cgroup-v2 filesystem, all three host controllers and all
+three controllers readable by the runner at the manager's `cgroup.controllers`.
+The [systemd delegation interface](https://www.freedesktop.org/software/systemd/man/255/systemd.resource-control.html#Delegate=)
+lets the existing user manager enable these controllers for resource-controlled
+user units. Missing/disabled controllers or unexpected hierarchy fail STOP;
+S3C never writes cgroupfs, relaxes host policy or silently repairs delegation.
+These convergence checks inspect prerequisites; they do not submit a build or
+prove kernel limits/pressure behavior. The application retains its own exact
+finite transient parent creation, limit attestation and stop/revert semantics.
+
+The following deterministic facts are available to later S3E tasks in the same
+play, derived afresh from the actual identity on every convergence:
+
+| Fact | Value / downstream use |
+| --- | --- |
+| `mcp_user_manager_unit` | `user@<UID>.service`; require, order after and bind application lifetime to this prerequisite |
+| `mcp_user_runtime_unit` | `user-runtime-dir@<UID>.service`, managed by the distribution user-manager unit |
+| `mcp_user_manager_cgroup` | `/user.slice/user-<UID>.slice/user@<UID>.service` |
+| `mcp_user_manager_environment` | `XDG_RUNTIME_DIR=/run/user/<UID>` and `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<UID>/bus` |
+| `mcp_user_manager_required_controllers` | `cpu`, `memory`, `pids` |
+| `mcp_service_environment` | S3B runtime environment combined with the explicit S3C runtime/bus environment |
+
+The [distribution runtime-directory service](https://www.freedesktop.org/software/systemd/man/255/user%40.service.html)
+creates `/run/user/<UID>`; S3C does not create/chown that directory itself.
+It starts/enables the packaged user `dbus.socket` with the explicit environment,
+checks the runtime directory is UID-owned mode 0700 and the bus is a UID-owned
+socket, then checks `systemctl --user show ... -.slice` returns the expected
+manager ControlGroup. `/usr/bin/systemd-run --version` checks executable access.
+No shell startup file, login, ambient bus address or interactive authentication
+is required. The same `mcp_service_environment` must be explicitly supplied by
+later service execution and host control/recovery commands as `mcp-runner`.
+Setting environment does not change process cgroup membership.
+
+S3E must consume this prerequisite and environment alongside S3B's Data gates;
+it owns production service placement, lifecycle/restart wiring and bounded logs.
+Daemon/control/recovery processes must stay outside every finite `mcpws<W><G>.slice`
+build parent. S3C creates no application/Tunnel unit, moves no process, changes
+no Go source or application cgroup semantics, and grants no sudo or host capability.
+
+The Python suite additionally runs the production S3C fact/assertion tasks through
+local Ansible using synthetic identities, manager properties, controller lists
+and runtime/bus metadata. It checks multiple UIDs, wrong ancestry/identity,
+missing controllers/delegation/linger, and unsafe runtime/bus interfaces. It also
+inspects the provisioning graph for login-free boot persistence and absence of
+new units/helpers/cgroup writes. These tests never run provisioning tasks,
+loginctl, systemctl or systemd-run, and never contact a deployment host.
+Actual boot/logout availability, user bus operation, controller delegation,
+transient-parent creation/stopping, OCI ancestry/effective limits and pressure /
+saturation/control survival remain unverified real-host behavior at this Author
+checkpoint. Independent source review is still required.
