@@ -1,0 +1,13 @@
+---
+- name: Require the UID-owned runtime and bus at the conventional user-manager path
+  ansible.builtin.assert:
+    that:
+      - mcp_user_runtime_paths.results[0].stat.isdir | default(false)
+      - not (mcp_user_runtime_paths.results[0].stat.islnk | default(false))
+      - mcp_user_runtime_paths.results[0].stat.uid | int == mcp_runner_uid | int
+      - mcp_user_runtime_paths.results[0].stat.mode == '0700'
+      - mcp_user_runtime_paths.results[1].stat.issock | default(false)
+      - not (mcp_user_runtime_paths.results[1].stat.islnk | default(false))
+      - mcp_user_runtime_paths.results[1].stat.uid | int == mcp_runner_uid | int
+      - mcp_user_root_cgroup.stdout == mcp_user_manager_cgroup
+    fail_msg: 'STOP: explicit runtime/bus access does not address the expected mcp-runner user manager.'

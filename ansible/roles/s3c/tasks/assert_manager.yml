@@ -1,0 +1,12 @@
+---
+- name: Require unattended availability and the conventional delegated manager
+  ansible.builtin.assert:
+    that:
+      - mcp_runner_linger.stdout == 'yes'
+      - mcp_user_manager.status.LoadState == 'loaded'
+      - mcp_user_manager.status.ActiveState == 'active'
+      - mcp_user_manager.status.User | string == mcp_runner_uid | string
+      - mcp_user_manager.status.ControlGroup == mcp_user_manager_cgroup
+      - mcp_user_manager.status.Delegate == 'yes'
+      - mcp_user_manager_required_controllers | difference(mcp_user_manager.status.DelegateControllers.split()) | length == 0
+    fail_msg: 'STOP: the existing user@UID.service must provide unattended cpu/memory/pids delegation at the source-required path; do not add another authority.'
