@@ -1,0 +1,182 @@
+---
+- name: Require verified S3A identity and explicit trusted network inputs
+  ansible.builtin.assert:
+    that:
+      - mcp_runner_account == 'mcp-runner'
+      - mcp_runner_uid | int > 0
+      - mcp_runner_primary_gid | int > 0
+      - mcp_public_dns is sequence and mcp_public_dns is not string
+      - mcp_public_dns | length >= 1 and mcp_public_dns | length <= 3
+      - mcp_host_public_ips is sequence and mcp_host_public_ips is not string
+      - mcp_host_public_ips | length > 0
+    fail_msg: 'STOP: S3D requires actual account facts, public DNS and all host public/NAT IPs.'
+
+- name: Inspect existing service authorities
+  ansible.builtin.service_facts:
+
+- name: Refuse competing active or boot-enabled firewall authorities
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services[item].state != 'running'
+      - ansible_facts.services[item].status | default('unknown') in ['disabled', 'masked']
+    fail_msg: 'STOP: competing firewall service; operator reconciliation required.'
+  loop: [ufw.service, nftables.service, firewalld.service]
+  when: item in ansible_facts.services
+
+- name: Disable package installer autosave of existing rules
+  ansible.builtin.debconf:
+    name: iptables-persistent
+    question: "iptables-persistent/autosave_v{{ item }}"
+    value: 'false'
+    vtype: boolean
+  loop: [4, 6]
+
+- name: Install the single supported persistent firewall authority without activation
+  ansible.builtin.apt:
+    name: [iptables=1.8.10-*, iptables-persistent=1.0.20, netfilter-persistent=1.0.20]
+    state: present
+    update_cache: true
+    allow_downgrade: false
+    fail_on_autoremove: true
+    install_recommends: false
+    policy_rc_d: 101
+
+- name: Inspect owned configuration parent paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop: [/etc/iptables, /etc/sysctl.d, /etc/default]
+  register: mcp_network_parents
+
+- name: Refuse unsafe existing configuration directories
+  ansible.builtin.assert:
+    that:
+      - item.stat.isdir | default(false)
+      - not item.stat.islnk
+      - item.stat.uid == 0 and item.stat.gid == 0
+      - item.stat.mode[-2] not in ['2', '3', '6', '7']
+      - item.stat.mode[-1] not in ['2', '3', '6', '7']
+    fail_msg: 'STOP: unsafe network configuration directory.'
+  loop: "{{ mcp_network_parents.results }}"
+  when: item.stat.exists
+
+- name: Create the persistent rule directory only when absent
+  ansible.builtin.file:
+    path: /etc/iptables
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: not mcp_network_parents.results[0].stat.exists
+
+- name: Require only the two accepted persistent loader plugins
+  ansible.builtin.find:
+    paths: /usr/share/netfilter-persistent/plugins.d
+    file_type: any
+    hidden: true
+  register: mcp_network_plugins
+
+- name: Refuse additional persistence plugins or missing IPv6 loader
+  ansible.builtin.assert:
+    that:
+      - mcp_network_plugins.files | map(attribute='path') | map('basename') | sort == ['15-ip4tables', '25-ip6tables']
+    fail_msg: 'STOP: unexpected persistent firewall plugin authority.'
+
+- name: Validate trusted inputs and plan both persistent families without mutation
+  mcp_network_plan:
+    uid: "{{ mcp_runner_uid }}"
+    gid: "{{ mcp_runner_primary_gid }}"
+    resolvers: "{{ mcp_public_dns }}"
+    host_public_ips: "{{ mcp_host_public_ips }}"
+  register: mcp_network_plan
+
+- name: Expose the validated ordered resolver interface for later S3E
+  ansible.builtin.set_fact:
+    mcp_public_dns_validated: "{{ mcp_network_plan.public_dns }}"
+
+- name: Inspect configuration destinations before writing
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /etc/iptables/rules.v4
+    - /etc/iptables/rules.v6
+    - /etc/sysctl.d/99-mcp-network.conf
+    - /etc/default/netfilter-persistent
+    - /etc/resolv.conf
+  register: mcp_network_destinations
+
+- name: Refuse unsafe existing configuration destinations
+  ansible.builtin.assert:
+    that:
+      - item.stat.uid == 0 and item.stat.gid == 0
+      - item.stat.isreg or (item.item == '/etc/resolv.conf' and item.stat.islnk and item.stat.lnk_source in ['/run/systemd/resolve/stub-resolv.conf', '/run/systemd/resolve/resolv.conf', '/usr/lib/systemd/resolv.conf'])
+      - item.stat.islnk or (item.stat.mode[-2] not in ['2', '3', '6', '7'] and item.stat.mode[-1] not in ['2', '3', '6', '7'])
+    fail_msg: 'STOP: unsafe or unexpected network configuration destination.'
+  loop: "{{ mcp_network_destinations.results }}"
+  when: item.stat.exists
+
+- name: Configure distribution persistence without flushing or additive restore
+  ansible.builtin.copy:
+    content: "{{ mcp_network_plan.persistence_defaults }}"
+    dest: /etc/default/netfilter-persistent
+    owner: root
+    group: root
+    mode: '0644'
+  # The plugin's optional test mode returns success on parser failure. The
+  # planner tests both inputs explicitly; restore errors must propagate.
+
+- name: Write both preserved persistent rule files as root
+  ansible.builtin.copy:
+    content: "{{ mcp_network_plan.rules[item] }}"
+    dest: "/etc/iptables/rules.{{ item }}"
+    owner: root
+    group: root
+    mode: '0640'
+  loop: [v4, v6]
+
+- name: Load through the accepted persistent authority on every convergence
+  ansible.builtin.command:
+    argv: [/usr/sbin/netfilter-persistent, start]
+  changed_when: true
+
+- name: Enable the distribution persistent firewall service for boot
+  ansible.builtin.systemd_service:
+    name: netfilter-persistent.service
+    enabled: true
+    state: started
+
+- name: Write one owned exact-primary-GID ping prerequisite source
+  ansible.builtin.copy:
+    content: "{{ mcp_network_plan.ping_sysctl }}"
+    dest: /etc/sysctl.d/99-mcp-network.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Apply the effective sysctl configuration for this key only
+  ansible.builtin.command:
+    argv: [/usr/lib/systemd/systemd-sysctl, --prefix=net/ipv4/ping_group_range]
+  changed_when: true
+
+- name: Read the resulting exact ping range
+  ansible.builtin.slurp:
+    src: /proc/sys/net/ipv4/ping_group_range
+  register: mcp_ping_range
+
+- name: Refuse a conflicting effective sysctl override
+  ansible.builtin.assert:
+    that:
+      - (mcp_ping_range.content | b64decode).split() == [mcp_runner_primary_gid | string, mcp_runner_primary_gid | string]
+    fail_msg: 'STOP: effective ping range differs from the exact primary GID; no broader range accepted.'
+
+# copy follow:false atomically replaces the known resolved symlink itself, not
+# its generated /run target. No unlink gap, stub upstream or cache daemon added.
+- name: Install the single direct host resolver view from validated ordered values
+  ansible.builtin.copy:
+    content: "{{ mcp_network_plan.resolv_conf }}"
+    dest: /etc/resolv.conf
+    follow: false
+    owner: root
+    group: root
+    mode: '0644'
