@@ -110,8 +110,32 @@ PR review の task contract は、必要に応じて少なくとも次を明示�
 independent reviewer は、bounded な authority と review instruction に基づいて
 native GitHub Pull Request Review を提出する。
 
-通常の disposition は `APPROVE` または `REQUEST_CHANGES` とし、
-approval gate が目的でない場合に限り `COMMENT` を使用できる。
+通常の disposition は `APPROVE` または `REQUEST_CHANGES` とする。
+
+GitHub identity restriction により `APPROVE` / `REQUEST_CHANGES` を
+提出できない場合に限り、native GitHub Pull Request Review の
+`COMMENT` / `COMMENTED` を verifier disposition の transport fallback として
+使用してよい。
+
+この fallback review は少なくとも次を明示する。
+
+- exact reviewed HEAD SHA
+- substantive verdict: `PASS` または `RETURN`
+- blocking / non-blocking findings
+- evidence boundary
+- landing recommendation
+- native `APPROVE` / `REQUEST_CHANGES` を使用できなかった理由
+
+`COMMENTED` fallback は native GitHub approval ではない。
+`COMMENTED + PASS` を `APPROVED` と表現せず、
+`COMMENTED + RETURN` を `REQUEST_CHANGES` と表現しない。
+
+fallback は implementation と independent verification の role separation を
+緩和しない。同じ GitHub account identity を使用していても、
+implementation role が independent verification role を兼ねてよいことにはならない。
+
+repository / branch protection が native approval を要求する場合、
+この fallback はその requirement を満たさず、迂回にも使用しない。
 
 review disposition は、実際に review した commit SHA に bind される。
 review 後に PR HEAD が変わった場合、以前の review はその reviewed SHA に対する
