@@ -1,0 +1,16 @@
+#!/usr/bin/python3
+# Root-owned, one-shot, read-only mount prerequisite. No repair authority.
+import sys
+sys.path.insert(0, '/usr/local/lib/mcp-workspaced')
+from mcp_data import filesystem, guard, inspect, validate
+
+try:
+    snapshot = validate(inspect({{ mcp_data_device_id | to_json }}),
+                        {{ mcp_data_device_id | to_json }}, {{ mcp_data_expected_serial | to_json }},
+                        {{ mcp_data_expected_bytes | int }}, {{ mcp_data_expected_sector_bytes | int }}, False)
+    filesystem(snapshot, {{ mcp_data_uuid | to_json }})
+    guard(snapshot)
+    if sys.argv[1:] == ['--mounted'] and len(snapshot['mounts']) != 1:
+        raise ValueError('Data must be mounted from the verified target')
+except Exception as exc:
+    sys.exit('STOP: ' + str(exc))

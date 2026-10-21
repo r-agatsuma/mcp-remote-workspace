@@ -1,0 +1,7 @@
+---
+- name: Explicit first-provision Data bootstrap only
+  hosts: mcp_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - data_bootstrap

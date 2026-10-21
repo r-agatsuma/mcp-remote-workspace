@@ -1,0 +1,13 @@
+[Unit]
+Description=Validate mounted Data identity before runtime consumers
+Requires=srv-mcp\x2dpodman.mount
+After=srv-mcp\x2dpodman.mount
+BindsTo=srv-mcp\x2dpodman.mount
+Before=local-fs.target
+DefaultDependencies=no
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/mcp-workspaced/data-verify --mounted
+RemainAfterExit=yes
+[Install]
+RequiredBy=local-fs.target

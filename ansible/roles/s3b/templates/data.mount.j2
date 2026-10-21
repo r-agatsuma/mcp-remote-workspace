@@ -1,0 +1,12 @@
+[Unit]
+Description=Disposable workspace Data (verified whole-device ext4)
+Requires=mcp-data-verify.service
+After=mcp-data-verify.service
+[Mount]
+What=/dev/disk/by-uuid/{{ mcp_data_uuid }}
+Where=/srv/mcp-podman
+Type=ext4
+Options=rw,nosuid,nodev
+TimeoutSec=30
+[Install]
+WantedBy=local-fs.target

@@ -5,3 +5,24 @@ mcp_runner_user: mcp-runner
 mcp_tunnel_user: mcp-tunnel
 mcp_source_path: /usr/local/src/mcp-workspaced
 mcp_go_toolchain: go1.26.9
+
+# S3B fixed reference paths; no bootstrap enable is stored in inventory.
+mcp_data_mount: /srv/mcp-podman
+mcp_runner_home: /srv/mcp-podman/runner
+mcp_runtime_graphroot: /srv/mcp-podman/runner/.local/share/containers/storage
+mcp_runtime_static_dir: /srv/mcp-podman/runner/.local/share/containers/storage/libpod
+mcp_runtime_volume_path: /srv/mcp-podman/runner/.local/share/containers/storage/volumes
+mcp_runtime_tmp: /srv/mcp-podman/tmp
+mcp_runtime_events: /srv/mcp-podman/events/events.log
+mcp_workspace_data_dir: /srv/mcp-podman/workspaces
+mcp_workspace_state_dir: /srv/mcp-podman/runner/.local/state/mcp-workspaced
+
+# Trusted per-host inputs. These placeholders intentionally fail closed.
+mcp_data_device_id: /dev/disk/by-id/REPLACE_WITH_WHOLE_DATA_DEVICE_ID
+mcp_data_expected_serial: REPLACE_WITH_EXPECTED_UDEV_ID_SERIAL
+mcp_data_expected_bytes: 0
+mcp_data_expected_sector_bytes: 512
+mcp_data_uuid: REPLACE_WITH_BOOTSTRAP_RESULT_UUID
+mcp_runner_subuid_start: 0
+mcp_runner_subgid_start: 0
+mcp_runner_subid_count: 65536

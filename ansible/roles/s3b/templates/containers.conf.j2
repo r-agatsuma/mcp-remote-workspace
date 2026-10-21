@@ -1,0 +1,14 @@
+[containers]
+log_driver = "k8s-file"
+log_size_max = 10485760
+[engine]
+runtime = "crun"
+cgroup_manager = "systemd"
+network_backend = "netavark"
+static_dir = "{{ mcp_runtime_static_dir }}"
+volume_path = "{{ mcp_runtime_volume_path }}"
+tmp_dir = "/run/user/{{ mcp_runner_uid }}/libpod/tmp"
+image_copy_tmp_dir = "{{ mcp_runtime_tmp }}"
+events_logger = "file"
+events_logfile_path = "{{ mcp_runtime_events }}"
+events_logfile_max_size = "10m"
