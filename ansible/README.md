@@ -204,8 +204,13 @@ graphroot/rootless_storage_path and UID-derived `/run/user/<UID>/containers`
 runroot. Podman DB/volumes are explicit. Empty mount_program selects native
 overlay. Recommended packages are disabled for runtime installation; a fixed
 `PATH=/usr/bin:/bin`, rejection of fuse-overlayfs in that PATH, and rejection of
-an existing GraphRoot `.has-mount-program` marker prevent an implicit fuse
-fallback/store conversion. Unexpected packages/stores are not removed. The [shared containers configuration](https://raw.githubusercontent.com/containers/common/v0.57.1/docs/containers.conf.5.md)
+an existing `<GraphRoot>/overlay/.has-mount-program` marker prevent an implicit
+fuse fallback/store conversion. A missing overlay directory is valid for a new
+store. An existing overlay directory is opened relative to the pinned GraphRoot
+fd with `O_NOFOLLOW`; its identity, Data device, mount ID, runner ownership and
+non-group/world-writable mode must be verifiable. Symlinks, foreign mounts and
+untrusted state fail closed. Markers and stores are never removed or migrated.
+The [shared containers configuration](https://raw.githubusercontent.com/containers/common/v0.57.1/docs/containers.conf.5.md)
 supports the engine's Data image-copy temp and event settings. Build workers also
 receive the source-owned generation-specific Data TMPDIR via systemd-run.
 
@@ -213,13 +218,14 @@ Only volatile runroot/libpod runtime state is under `/run/user/<UID>` (tmpfs on
 the reference host). Fixed deployment configuration, account/subid records,
 package metadata and verifier code are host/control state with size determined
 by deployment, not caller output. Runtime events and container output avoid the
-host persistent journal. The native journald drop-in independently bounds
-control-plane metadata: SystemMaxUse=64M, SystemMaxFileSize=8M, RuntimeMaxUse=16M,
-RuntimeMaxFileSize=4M. These apply to the host journal as a whole and restart
-journald only when changed; retention includes the fixed active-file overhead
-allowed by journald, so 64 MiB is not a strict total-filesystem-byte ceiling. Application diagnostics remain the existing bounded
-Data files. Exact-zero behavior remains fail closed/operator recovery; no new
-recovery procedure is supplied here.
+host persistent journal. Application diagnostics remain the existing bounded
+Data files. S3B does not configure or establish host journald retention bounds.
+The later production-service owner must place caller-induced service
+stdout/stderr/control-plane logs on Data or independently hard-bound their
+persistent retention, and provide source/static evidence of that placement or
+bound before production-service acceptance. S3B does not implement those service
+units or choose a host-wide logging policy. Exact-zero behavior remains fail
+closed/operator recovery; no new recovery procedure is supplied here.
 
 ### Source/static validation
 

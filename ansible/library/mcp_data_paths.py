@@ -15,6 +15,39 @@ RUNNER_PATHS = ['runner/.local/state/mcp-workspaced', 'runner/.cache',
     'runner/.local/share/containers/storage/volumes', 'tmp', 'events', 'workspaces']
 
 
+def mount_id(fd):
+    with open('/proc/self/fdinfo/%d' % fd, encoding='ascii') as info:
+        ids = [int(line.split(':', 1)[1]) for line in info if line.startswith('mnt_id:')]
+    require(len(ids) == 1 and ids[0] > 0, 'cannot verify overlay mount identity')
+    return ids[0]
+
+
+def check_overlay_store(graphroot, device, uid, gid):
+    # A new store need not have an overlay directory yet. Only absence of that
+    # entry is accepted; dangling symlinks and failed/raced opens are not absence.
+    try:
+        entry = os.stat('overlay', dir_fd=graphroot, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    require(stat.S_ISDIR(entry.st_mode), 'overlay store is not a real directory')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    overlay = os.open('overlay', flags, dir_fd=graphroot)
+    try:
+        st = os.fstat(overlay)
+        require(st.st_dev == entry.st_dev == device and st.st_ino == entry.st_ino
+                and st.st_uid == uid and st.st_gid == gid and not st.st_mode & 0o022,
+                'untrusted overlay store ownership, permissions or Data path')
+        require(mount_id(overlay) == mount_id(graphroot), 'overlay store crosses a mount boundary')
+        try:
+            os.stat('.has-mount-program', dir_fd=overlay, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError('STOP: existing overlay store used a mount program; no conversion/repair')
+    finally:
+        os.close(overlay)
+
+
 def provision(uid, gid):
     require(uid > 0 and gid > 0, 'non-root runner required')
     require(os.path.ismount(MOUNT), 'Data is not mounted')
@@ -48,17 +81,12 @@ def provision(uid, gid):
                 try:
                     if created:
                         os.fchown(leaf, owner, group)
-                    if rel == 'runner/.local/share/containers/storage':
-                        try:
-                            os.stat('.has-mount-program', dir_fd=leaf, follow_symlinks=False)
-                        except FileNotFoundError:
-                            pass
-                        else:
-                            raise ValueError('STOP: existing store used a mount program; no conversion/repair')
                     st = os.fstat(leaf)
                     require(st.st_dev == base.st_dev and st.st_uid == owner and st.st_gid == group
                             and stat.S_IMODE(st.st_mode) == mode,
                             'unexpected existing runtime path ownership/mode/type: ' + rel)
+                    if rel == 'runner/.local/share/containers/storage':
+                        check_overlay_store(leaf, base.st_dev, uid, gid)
                 finally:
                     os.close(leaf)
             finally:

@@ -2,6 +2,7 @@
 import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import types
@@ -216,6 +217,80 @@ def os_rdev():
     return bootstrap.os.makedev(8, 16)
 
 
+class OverlayStore(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix='s3b-overlay-store-')
+        self.addCleanup(directory.cleanup)
+        self.graphroot = Path(directory.name) / 'storage'
+        self.graphroot.mkdir(mode=0o700)
+        self.fd = os.open(self.graphroot, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, self.fd)
+        self.device = os.fstat(self.fd).st_dev
+        self.uid, self.gid = os.geteuid(), os.getegid()
+
+    def check(self):
+        paths_module.check_overlay_store(self.fd, self.device, self.uid, self.gid)
+
+    def test_real_overlay_mount_program_marker_rejected_without_mutation(self):
+        overlay = self.graphroot / 'overlay'
+        overlay.mkdir(mode=0o700)
+        marker = overlay / '.has-mount-program'
+        marker.write_text('synthetic existing fuse-overlayfs store\n')
+        before = marker.stat()
+        with self.assertRaisesRegex(ValueError, 'STOP: existing overlay store used a mount program'):
+            self.check()
+        self.assertEqual(marker.read_text(), 'synthetic existing fuse-overlayfs store\n')
+        after = marker.stat()
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns),
+                         (before.st_ino, before.st_size, before.st_mtime_ns))
+
+    def test_new_store_without_overlay_is_valid_and_not_created(self):
+        self.check()
+        self.assertEqual(list(self.graphroot.iterdir()), [])
+
+    def test_existing_trusted_overlay_without_marker_is_valid(self):
+        (self.graphroot / 'overlay').mkdir(mode=0o700)
+        self.check()
+
+    def test_overlay_symlinks_and_non_directory_rejected(self):
+        overlay = self.graphroot / 'overlay'
+        overlay.symlink_to(self.graphroot, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'not a real directory'):
+            self.check()
+        overlay.unlink()  # Fixture setup only; production never removes entries.
+        overlay.symlink_to(self.graphroot / 'missing', target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'not a real directory'):
+            self.check()
+        overlay.unlink()
+        overlay.write_text('not a directory')
+        with self.assertRaisesRegex(ValueError, 'not a real directory'):
+            self.check()
+
+    def test_overlay_untrusted_owner_group_mode_or_device_rejected(self):
+        overlay = self.graphroot / 'overlay'
+        overlay.mkdir(mode=0o700)
+        for device, uid, gid in [(self.device + 1, self.uid, self.gid),
+                                 (self.device, self.uid + 1, self.gid),
+                                 (self.device, self.uid, self.gid + 1)]:
+            with self.subTest(device=device, uid=uid, gid=gid), self.assertRaisesRegex(ValueError, 'untrusted overlay'):
+                paths_module.check_overlay_store(self.fd, device, uid, gid)
+        overlay.chmod(0o770)
+        with self.assertRaisesRegex(ValueError, 'untrusted overlay'):
+            self.check()
+
+    def test_same_device_foreign_mount_and_unverifiable_state_rejected(self):
+        (self.graphroot / 'overlay').mkdir(mode=0o700)
+        with patch.object(paths_module, 'mount_id', side_effect=[101, 102]), \
+                self.assertRaisesRegex(ValueError, 'mount boundary'):
+            self.check()
+        with patch.object(paths_module.os, 'open', side_effect=PermissionError('synthetic inaccessible overlay')), \
+                self.assertRaises(PermissionError):
+            self.check()
+        with patch.object(paths_module, 'mount_id', side_effect=ValueError('synthetic unavailable mount evidence')), \
+                self.assertRaises(ValueError):
+            self.check()
+
+
 class SourceContract(unittest.TestCase):
     def setUp(self):
         self.values = yaml.safe_load((ROOT / 'group_vars/all.yml').read_text())
@@ -295,10 +370,6 @@ class SourceContract(unittest.TestCase):
         self.assertTrue(engine['tmp_dir'].startswith('/run/user/1234/'))
         self.assertEqual(engine['events_logfile_max_size'], '10m')
         self.assertEqual(engine_conf['containers']['log_size_max'], 10485760)
-        journal = configparser.ConfigParser(interpolation=None)
-        journal.read_string(self.render('journal-bounds.conf.j2'))
-        self.assertEqual(journal['Journal']['SystemMaxUse'], '64M')
-        self.assertEqual(journal['Journal']['SystemMaxFileSize'], '8M')
         env = dict(line.split('=', 1) for line in self.render('runtime.env.j2').splitlines() if '=' in line)
         for key in ['HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME']:
             self.assertTrue(env[key].startswith('/srv/mcp-podman/'))
@@ -318,8 +389,20 @@ class SourceContract(unittest.TestCase):
         self.assertIn('os.O_NOFOLLOW', paths)
         self.assertIn('dir_fd=parent', paths)
         self.assertIn('os.fchown(leaf, owner, group)', paths)
-        self.assertIn("os.stat('.has-mount-program', dir_fd=leaf, follow_symlinks=False)", paths)
+        self.assertIn('check_overlay_store(leaf, base.st_dev, uid, gid)', paths)
+        self.assertIn("os.open('overlay', flags, dir_fd=graphroot)", paths)
+        self.assertIn("os.stat('.has-mount-program', dir_fd=overlay, follow_symlinks=False)", paths)
         self.assertIn('st.st_dev == base.st_dev', paths)
+
+    def test_no_s3b_host_global_journald_policy(self):
+        source = '\n'.join(path.read_text() for path in (ROOT / 'roles/s3b').rglob('*') if path.is_file())
+        for forbidden in ['SystemMaxUse', 'SystemMaxFileSize', 'RuntimeMaxUse', 'RuntimeMaxFileSize',
+                          'journald.conf.d', 'systemd-journald.service', 'journal-bounds.conf']:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+        docs = (ROOT / 'README.md').read_text()
+        self.assertIn('S3B does not configure or establish host journald retention bounds.', docs)
+        self.assertIn('stdout/stderr/control-plane logs on Data or independently hard-bound', docs)
 
     @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze unavailable')
     def test_systemd_units_in_synthetic_root(self):
