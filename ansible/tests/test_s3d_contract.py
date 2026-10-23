@@ -1,4 +1,5 @@
 """Source/synthetic S3D evidence. No host firewall, sysctl, or DNS mutation."""
+import hashlib
 import importlib.util
 import ipaddress
 import os
@@ -29,6 +30,7 @@ network = load('ansible.module_utils.mcp_network', ROOT / 'module_utils/mcp_netw
 planner = load('mcp_network_plan_test', ROOT / 'library/mcp_network_plan.py')
 HOSTS = ['11.12.13.14', '2600:1234::5']  # Synthetic host identities, no network use.
 DNS = ['9.9.9.9', '2606:4700:4700::1111', '8.8.4.4']
+ENDPOINT = yaml.safe_load((ROOT / 'group_vars/all.yml').read_text())['mcp_production_endpoint']
 BASE = '''*filter
 :INPUT DROP [12:34]
 :FORWARD DROP [0:0]
@@ -61,8 +63,13 @@ BAD = [
 ]
 
 
+def reply_rule(port):
+    return (f'-A MCP_S3D_OUTPUT -s 127.0.0.1/32 -d 127.0.0.1/32 -o lo -p tcp -m conntrack '
+            f'--ctorigsrc 127.0.0.1 --ctorigdst 127.0.0.1 --ctorigdstport {port} --ctdir REPLY -j ACCEPT')
+
+
 def evaluate(rendered, address, uid, local=False, broadcast=False):
-    """Small strict interpreter for rendered owner/destination/terminal rules.
+    """Small strict interpreter for ordinary (non-MCP-reply) destination policy.
 
     This is rule-order inspection, NOT packet/Netfilter evidence. Unknown
     generated syntax fails the test instead of being treated as an allow/deny.
@@ -75,7 +82,11 @@ def evaluate(rendered, address, uid, local=False, broadcast=False):
     target = ipaddress.ip_address(address)
     rules = [shlex.split(line)[2:] for line in lines if line.startswith('-A ' + network.CHAIN + ' ')]
     for rule in rules:
-        if rule == ['-m', 'addrtype', '--dst-type', 'LOCAL', '-j', 'DROP']:
+        if rule == shlex.split(reply_rule(ENDPOINT['port']))[2:]:
+            # The exact tuple/REPLY exception is checked separately. Ordinary
+            # destination probes here do not model that TCP reply flow.
+            continue
+        elif rule == ['-m', 'addrtype', '--dst-type', 'LOCAL', '-j', 'DROP']:
             if local:
                 return 'DROP'
         elif rule == ['-m', 'addrtype', '--dst-type', 'BROADCAST', '-j', 'DROP']:
@@ -96,6 +107,30 @@ def evaluate(rendered, address, uid, local=False, broadcast=False):
 
 
 class Inputs(unittest.TestCase):
+    def test_shared_production_endpoint_reference_and_port_boundaries(self):
+        self.assertEqual(ENDPOINT, {'address': '127.0.0.1', 'port': 8080})
+        self.assertEqual(network.production_endpoint(ENDPOINT), ENDPOINT)
+        for port in [1, 65535]:
+            endpoint = dict(ENDPOINT, port=port)
+            self.assertEqual(network.production_endpoint(endpoint), endpoint)
+
+    def test_endpoint_fails_closed_without_coercion(self):
+        invalid = [None, [], '127.0.0.1:8080', {}, {'address': '127.0.0.1'},
+                   {'port': 8080}, dict(ENDPOINT, extra=True)]
+        invalid += [dict(ENDPOINT, address=address) for address in
+                    ['127.0.0.2', '127.1', '127.0.0.0/8', '0.0.0.0', '::1',
+                     'localhost', '127.0.0.1/32', ' 127.0.0.1', None, 2130706433]]
+        invalid += [dict(ENDPOINT, port=port) for port in
+                    [None, True, False, '8080', '1', 8080.0, 1.5, 0, -1, 65536, [], {}]]
+        for endpoint in invalid:
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaises(ValueError):
+                    network.production_endpoint(endpoint)
+                # No valid family silently ignores invalid shared deployment input.
+                for family in [4, 6]:
+                    with self.assertRaises(ValueError):
+                        network.render_rules(BASE, BASE, 947, family, HOSTS, endpoint)
+
     def test_ipv4_protocol_anycast_is_not_a_trusted_dns_default(self):
         # Egress eligibility does not imply deployment-default DNS eligibility.
         # Keep the stricter #111 resolver contract, including PCP/TURN anycast.
@@ -131,6 +166,75 @@ class Inputs(unittest.TestCase):
 
 
 class Rendering(unittest.TestCase):
+    def test_exact_ipv4_exception_order_and_deployment_port(self):
+        for uid in [947, 20481]:
+            for port in [ENDPOINT['port'], 18443, 1, 65535]:
+                endpoint = dict(ENDPOINT, port=port)
+                rendered = network.render_rules(BASE, BASE, uid, 4, HOSTS, endpoint)
+                lines = network.parse_save(rendered)['filter']
+                hook = (f'-A OUTPUT -m owner --uid-owner {uid} -m comment '
+                        '--comment mcp-s3d-output-v1 -j MCP_S3D_OUTPUT')
+                expected = reply_rule(port)
+                first = lines.index(hook)
+                self.assertEqual(lines[first:first + 4], [hook, expected,
+                    '-A MCP_S3D_OUTPUT -m addrtype --dst-type LOCAL -j DROP',
+                    '-A MCP_S3D_OUTPUT -m addrtype --dst-type BROADCAST -j DROP'])
+                self.assertEqual(rendered.count(expected + '\n'), 1)
+                # Reconcile old owned policy when the trusted port changes.
+                updated = network.render_rules(rendered, rendered, uid, 4, HOSTS,
+                                               dict(endpoint, port=port % 65535 + 1))
+                self.assertNotIn(expected + '\n', updated)
+
+    def test_only_owned_additions_and_no_broad_accept_anywhere(self):
+        # Existing operator policy may legitimately contain these constructs.
+        base = BASE.replace('-A OUTPUT -j ACCEPT\n',
+            '-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n'
+            '-A OUTPUT -p tcp --dport 8080 -j ACCEPT\n-A OUTPUT -j ACCEPT\n')
+        for family in [4, 6]:
+            rendered = network.render_rules(base, base, 947, family, HOSTS, ENDPOINT)
+            parsed = network.parse_save(rendered)
+            # Equality covers every table and ordered unowned rule, so a new
+            # broad rule outside the reserved chain cannot evade these checks.
+            self.assertEqual(network.unowned(parsed), network.unowned(network.parse_save(base)))
+            hook, rules = network.runner_rules(947, family, HOSTS, ENDPOINT)
+            base_rules = [line for values in network.parse_save(base).values() for line in values
+                          if line.startswith('-A ')]
+            additions = [line for values in parsed.values() for line in values
+                         if line.startswith('-A ') and line not in base_rules]
+            self.assertEqual(additions, [hook] + rules)
+            self.assertEqual(hook, '-A OUTPUT -m owner --uid-owner 947 -m comment '
+                             '--comment mcp-s3d-output-v1 -j MCP_S3D_OUTPUT')
+            accepts = [line for line in additions if line.endswith(' -j ACCEPT')]
+            self.assertEqual(accepts, ([reply_rule(ENDPOINT['port'])] if family == 4 else []) +
+                             ['-A MCP_S3D_OUTPUT -j ACCEPT'])
+            for token in ['ESTABLISHED', 'RELATED', '--ctstate', ' -m state ', '--sport', '--dport']:
+                self.assertNotIn(token, '\n'.join(additions))
+            for line in additions:
+                self.assertNotIn('::1', [token.split('/')[0] for token in shlex.split(line)])
+            remaining = rules[1:] if family == 4 else rules
+            self.assertTrue(all(line.endswith(' -j DROP') for line in remaining[:-1]))
+            self.assertNotIn('conntrack', '\n'.join(remaining))
+
+    def test_landed_policy_unchanged_except_exact_ipv4_insertion(self):
+        # SHA-256 of complete BASE/HOSTS/UID=947 render at landed #111 baseline
+        # 0a60115dd290c4e54e940d549f6e806a1efeb9b1, captured before this edit.
+        # This checks all tables, owned policy and ordering, including IPv6.
+        baseline = {4: 'bbd68a915d1d1c7166762837e0e3dd1d3357bb21e7af4251c0445df25e2a6a52',
+                    6: '0619405b7c0b46648cc2169d847e9a22c8363760f0bb50b01d1d2ef023e87127'}
+        for family in [4, 6]:
+            rendered = network.render_rules(BASE, BASE, 947, family, HOSTS, ENDPOINT)
+            if family == 4:
+                rendered = rendered.replace(reply_rule(ENDPOINT['port']) + '\n', '', 1)
+            else:
+                _, owned = network.runner_rules(947, 6, HOSTS, ENDPOINT)
+                self.assertEqual(owned[0], '-A MCP_S3D_OUTPUT -m addrtype --dst-type LOCAL -j DROP')
+                self.assertNotIn('conntrack', rendered)
+                for line in owned:
+                    self.assertNotIn('::1', [token.split('/')[0] for token in shlex.split(line)])
+                self.assertEqual(network.render_rules(BASE, BASE, 947, 6, HOSTS,
+                                 dict(ENDPOINT, port=18443)), rendered)
+            self.assertEqual(hashlib.sha256(rendered.encode()).hexdigest(), baseline[family])
+
     def test_ipv4_protocol_suballocation_iana_oracle(self):
         # Independent expected outcomes from IANA, not production prefix lists:
         # https://www.iana.org/assignments/iana-ipv4-special-registry
@@ -144,7 +248,7 @@ class Rendering(unittest.TestCase):
             '192.0.2.1': 'DROP', '240.0.0.1': 'DROP', HOSTS[0]: 'DROP',
         }
         for uid in [947, 20481]:
-            rendered = network.render_rules(BASE, BASE, uid, 4, HOSTS)
+            rendered = network.render_rules(BASE, BASE, uid, 4, HOSTS, ENDPOINT)
             for address, expected in cases.items():
                 with self.subTest(uid=uid, address=address):
                     self.assertEqual(evaluate(rendered, address, uid), expected)
@@ -156,23 +260,24 @@ class Rendering(unittest.TestCase):
 
     def test_ipv4_protocol_anycast_cannot_bypass_independent_security_denies(self):
         for address in ['192.0.0.9', '192.0.0.10']:
-            rendered = network.render_rules(BASE, BASE, 947, 4, HOSTS)
+            rendered = network.render_rules(BASE, BASE, 947, 4, HOSTS, ENDPOINT)
             with self.subTest(address=address):
                 self.assertEqual(evaluate(rendered, address, 947, local=True), 'DROP')
                 self.assertEqual(evaluate(rendered, address, 947, broadcast=True), 'DROP')
-                host_rendered = network.render_rules(BASE, BASE, 947, 4, HOSTS + [address])
+                host_rendered = network.render_rules(BASE, BASE, 947, 4, HOSTS + [address], ENDPOINT)
                 self.assertEqual(evaluate(host_rendered, address, 947), 'DROP')
                 owned = [shlex.split(line) for line in network.parse_save(host_rendered)['filter']
                          if line.startswith('-A ' + network.CHAIN + ' ')]
                 self.assertEqual(owned[-1], ['-A', network.CHAIN, '-j', 'ACCEPT'])
-                self.assertTrue(all(rule[-2:] == ['-j', 'DROP'] for rule in owned[:-1]))
+                self.assertEqual(owned[0], shlex.split(reply_rule(ENDPOINT['port'])))
+                self.assertTrue(all(rule[-2:] == ['-j', 'DROP'] for rule in owned[1:-1]))
 
     def test_multiple_actual_identities_sysctl_and_rerun(self):
         for uid, gid in [(947, 952), (20481, 31002)]:
             for family in [4, 6]:
-                rendered = network.render_rules(BASE, BASE, uid, family, HOSTS)
-                self.assertEqual(network.render_rules(rendered, rendered, uid, family, HOSTS), rendered)
-                self.assertEqual(network.render_rules(rendered, rendered, uid + 1, family, HOSTS).count(
+                rendered = network.render_rules(BASE, BASE, uid, family, HOSTS, ENDPOINT)
+                self.assertEqual(network.render_rules(rendered, rendered, uid, family, HOSTS, ENDPOINT), rendered)
+                self.assertEqual(network.render_rules(rendered, rendered, uid + 1, family, HOSTS, ENDPOINT).count(
                     f'--uid-owner {uid + 1} '), 1)
                 self.assertEqual(network.unowned(network.parse_save(rendered)),
                                  network.unowned(network.parse_save(BASE)))
@@ -187,15 +292,16 @@ class Rendering(unittest.TestCase):
         for address in public:
             family = ipaddress.ip_address(address).version
             with self.subTest(address=address):
-                rendered = network.render_rules(BASE, None, 947, family, HOSTS)
+                rendered = network.render_rules(BASE, None, 947, family, HOSTS, ENDPOINT)
                 self.assertEqual(evaluate(rendered, address, 947), 'ACCEPT')
                 self.assertEqual(evaluate(rendered, address, 947, local=True), 'DROP')
                 if family == 4:
                     self.assertEqual(evaluate(rendered, address, 947, broadcast=True), 'DROP')
-        # No protocol/port filter restricts required public TCP/UDP/ICMP/ICMPv6.
+        # Outside the exact reply, no protocol/port filter restricts public traffic.
         for family in [4, 6]:
-            _, rules = network.runner_rules(947, family, HOSTS)
-            self.assertTrue(all(' -p ' not in line and '--dport' not in line for line in rules))
+            _, rules = network.runner_rules(947, family, HOSTS, ENDPOINT)
+            remaining = rules[1:] if family == 4 else rules
+            self.assertTrue(all(' -p ' not in line and '--dport' not in line for line in remaining))
 
     def test_every_prohibited_destination_precedes_generic_accept(self):
         for address in BAD + HOSTS:
@@ -205,12 +311,12 @@ class Rendering(unittest.TestCase):
                 continue
             if '%' in address:
                 continue
-            rendered = network.render_rules(BASE, BASE, 947, parsed.version, HOSTS)
+            rendered = network.render_rules(BASE, BASE, 947, parsed.version, HOSTS, ENDPOINT)
             with self.subTest(address=address):
                 self.assertEqual(evaluate(rendered, address, 947), 'DROP')
         for family in [4, 6]:
-            _, rules = network.runner_rules(947, family, HOSTS)
-            self.assertEqual(sum(line.endswith(' ACCEPT') for line in rules), 1)
+            _, rules = network.runner_rules(947, family, HOSTS, ENDPOINT)
+            self.assertEqual(sum(line.endswith(' ACCEPT') for line in rules), 2 if family == 4 else 1)
             self.assertTrue(rules[-1].endswith(' ACCEPT'))
             self.assertNotIn('--dport 53', '\n'.join(rules))
             self.assertNotIn('ESTABLISHED', '\n'.join(rules))
@@ -223,17 +329,17 @@ class Rendering(unittest.TestCase):
                       '*filter\n:INPUT ACCEPT [0:0]\n', 'flush ruleset\n',
                       BASE.replace(':OPERATOR', ':MCP_S3D_OUTPUT'), '']:
             with self.subTest(value=value), self.assertRaises(ValueError):
-                network.render_rules(BASE, value, 947, 4, HOSTS)
+                network.render_rules(BASE, value, 947, 4, HOSTS, ENDPOINT)
         # A successful empty live save means no explicit tables on a clean host.
-        clean = network.render_rules('', None, 947, 6, HOSTS)
+        clean = network.render_rules('', None, 947, 6, HOSTS, ENDPOINT)
         self.assertEqual(evaluate(clean, DNS[1], 947), 'ACCEPT')
         # Preserve quoted operator rule data and exact non-owned rule ordering.
         quoted = BASE.replace('-A INPUT -i lo', '-A INPUT -m comment --comment "operator accepted input" -i lo')
-        rendered = network.render_rules(quoted, quoted, 947, 4, HOSTS)
+        rendered = network.render_rules(quoted, quoted, 947, 4, HOSTS, ENDPOINT)
         self.assertIn('--comment "operator accepted input" -i lo', rendered)
         self.assertEqual(network.unowned(network.parse_save(rendered)),
                          network.unowned(network.parse_save(quoted)))
-        ipv6 = network.render_rules(BASE, BASE, 947, 6, HOSTS)
+        ipv6 = network.render_rules(BASE, BASE, 947, 6, HOSTS, ENDPOINT)
         self.assertIn(f'-A {network.CHAIN} ! -d 2000::/3 -j DROP\n', ipv6)
         self.assertNotIn("'!'", ipv6)
 
@@ -265,7 +371,7 @@ class Rendering(unittest.TestCase):
 
 
 class Planner(unittest.TestCase):
-    def run_plan(self, uid=947, gid=952, account=None, nss='hosts: files dns\n', assigned=None, saved=None):
+    def run_plan(self, uid=947, gid=952, account=None, nss='hosts: files dns\n', assigned=None, saved=None, endpoint=ENDPOINT):
         def read(path, optional=False):
             if path == '/etc/nsswitch.conf':
                 return nss
@@ -291,7 +397,7 @@ class Planner(unittest.TestCase):
                 patch.object(planner, 'trusted_read', side_effect=read), \
                 patch.object(planner.os.path, 'realpath', return_value='/usr/sbin/xtables-nft-multi'), \
                 patch.object(planner, 'command', side_effect=execute) as calls:
-            result = planner.plan(uid, gid, DNS, HOSTS)
+            result = planner.plan(uid, gid, DNS, HOSTS, endpoint)
             self.assertEqual([call.args[0] for call in calls.call_args_list if call.args[0][-1] == '--test'], [
                 ['/usr/sbin/iptables-nft-restore', '--test'], ['/usr/sbin/ip6tables-nft-restore', '--test']])
             return result
@@ -311,8 +417,104 @@ class Planner(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'NSS'):
                 self.run_plan(nss=nss)
 
+    def test_shared_endpoint_reaches_renderer_and_invalid_input_stops_before_host_reads(self):
+        for port in [1, ENDPOINT['port'], 18443, 65535]:
+            endpoint = dict(ENDPOINT, port=port)
+            with patch.object(planner, 'production_endpoint', wraps=network.production_endpoint) as validate:
+                result = self.run_plan(endpoint=endpoint)
+                validate.assert_called_once_with(endpoint)
+            self.assertIn(reply_rule(port) + '\n', result['rules']['v4'])
+            self.assertNotIn('--ctorigdstport', result['rules']['v6'])
+        for endpoint in [dict(ENDPOINT, address='127.0.0.2'), dict(ENDPOINT, port='8080'),
+                         dict(ENDPOINT, port=True), dict(ENDPOINT, port=65536), None]:
+            with patch.object(planner, 'trusted_read') as read, patch.object(planner, 'command') as command:
+                with self.assertRaises(ValueError):
+                    planner.plan(947, 952, DNS, HOSTS, endpoint)
+                read.assert_not_called()
+                command.assert_not_called()
+
+    def test_ansible_module_preserves_endpoint_member_types(self):
+        # Run the real argument parser: nested type coercion must not turn a
+        # string, boolean or float port into an accepted integer.
+        from ansible.module_utils import basic
+        for port in [ENDPOINT['port'], '8080', True, 8080.0]:
+            endpoint = dict(ENDPOINT, port=port)
+            params = dict(uid=947, gid=952, resolvers=DNS, host_public_ips=HOSTS, endpoint=endpoint)
+            with patch.object(basic, '_load_params', return_value=params), \
+                    patch.object(planner, 'plan', return_value={}) as plan, \
+                    patch.object(basic.AnsibleModule, 'exit_json'), \
+                    patch.object(basic.AnsibleModule, 'fail_json') as fail:
+                planner.main()
+                fail.assert_not_called()
+                received = plan.call_args.args[-1]
+                self.assertEqual(received, endpoint)
+                self.assertIs(type(received['port']), type(port))
+                if type(port) is not int:
+                    with self.assertRaises(ValueError):
+                        network.production_endpoint(received)
+
 
 class Source(unittest.TestCase):
+    def test_endpoint_preflight_precedes_every_host_mutation(self):
+        tasks = yaml.safe_load((ROOT / 'roles/s3d/tasks/main.yml').read_text())
+        index = next(i for i, task in enumerate(tasks)
+                     if task['name'] == 'Validate trusted production MCP endpoint before host mutation')
+        # All tasks through the unconditional preflight are assertion-only;
+        # no module, import, block or conditional can mutate/bypass this prefix.
+        for task in tasks[:index + 1]:
+            self.assertEqual(set(task), {'name', 'ansible.builtin.assert'})
+        first_mutation = next(i for i, task in enumerate(tasks) if 'ansible.builtin.debconf' in task)
+        self.assertLess(index, first_mutation)
+        self.assertTrue(all(set(task) <= {'name', 'ansible.builtin.assert', 'ansible.builtin.service_facts',
+                                         'loop', 'when'} for task in tasks[:first_mutation]))
+
+    @unittest.skipUnless(shutil.which('ansible-playbook'), 'ansible-playbook unavailable')
+    def test_real_ansible_endpoint_preflight_rejects_before_continuation(self):
+        production = yaml.safe_load((ROOT / 'roles/s3d/tasks/main.yml').read_text())
+        preflight = next(task for task in production
+                         if task['name'] == 'Validate trusted production MCP endpoint before host mutation')
+        cases = [('missing endpoint', {}, True)]
+
+        def case(name, endpoint, reject):
+            cases.append((name, {'mcp_production_endpoint': endpoint}, reject))
+
+        for port in [1, ENDPOINT['port'], 18443, 65535]:
+            case(f'valid integer port {port}', dict(ENDPOINT, port=port), False)
+        for index, endpoint in enumerate([None, [], '127.0.0.1:8080', {}, {'address': '127.0.0.1'},
+                                          {'port': 8080}, dict(ENDPOINT, extra=True),
+                                          {'address': '127.0.0.1', 'other': 8080}]):
+            case(f'invalid mapping {index}', endpoint, True)
+        for address in ['127.0.0.2', '127.1', '127.0.0.0/8', '0.0.0.0', '::1', 'localhost',
+                        '127.0.0.1/32', ' 127.0.0.1', None, 2130706433]:
+            case(f'invalid address {address!r}', dict(ENDPOINT, address=address), True)
+        for port in [None, True, False, '8080', '1', 8080.0, 1.5, 0, -1, 65536, [], {}]:
+            case(f'invalid port {port!r}', dict(ENDPOINT, port=port), True)
+
+        plays = []
+        for name, values, reject in cases:
+            plays.append({'name': name, 'hosts': 'localhost', 'connection': 'local',
+                'gather_facts': False, 'become': False, 'vars': values, 'tasks': [
+                    {'ansible.builtin.set_fact': {'preflight_rejected': False, 'after_preflight': False}},
+                    {'block': [preflight, {'ansible.builtin.set_fact': {'after_preflight': True}}],
+                     'rescue': [{'ansible.builtin.set_fact': {
+                         'preflight_rejected': True,
+                         'failed_task': '{{ ansible_failed_task.name }}',
+                         'failed_message': '{{ ansible_failed_result.msg }}'}}]},
+                    {'ansible.builtin.assert': {'that': [
+                        'preflight_rejected == ' + ('true' if reject else 'false'),
+                        'after_preflight == ' + ('false' if reject else 'true'),
+                        'not preflight_rejected or failed_task == expected_task',
+                        'not preflight_rejected or failed_message == expected_message'],
+                     }, 'vars': {'expected_task': preflight['name'],
+                                 'expected_message': preflight['ansible.builtin.assert']['fail_msg']}}]})
+        with tempfile.TemporaryDirectory(prefix='s3d-endpoint-preflight-') as directory:
+            path = Path(directory) / 'contract.yml'
+            path.write_text(yaml.safe_dump(plays, sort_keys=False))
+            result = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(path)],
+                                    env={**os.environ, 'ANSIBLE_NOCOLOR': '1'},
+                                    text=True, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which('ansible-playbook'), 'ansible-playbook unavailable')
     def test_real_ansible_identity_input_assertion_and_downstream_fact(self):
         production = yaml.safe_load((ROOT / 'roles/s3d/tasks/main.yml').read_text())
@@ -339,7 +541,7 @@ class Source(unittest.TestCase):
         tasks = yaml.safe_load((ROOT / 'roles/s3d/tasks/main.yml').read_text())
         plan = next(task for task in tasks if 'mcp_network_plan' in task)
         self.assertEqual(plan['mcp_network_plan'], dict(uid='{{ mcp_runner_uid }}', gid='{{ mcp_runner_primary_gid }}',
-            resolvers='{{ mcp_public_dns }}', host_public_ips='{{ mcp_host_public_ips }}'))
+            resolvers='{{ mcp_public_dns }}', host_public_ips='{{ mcp_host_public_ips }}', endpoint='{{ mcp_production_endpoint }}'))
         identity = (ROOT / 'roles/s3a/tasks/assert_created_identities.yml').read_text()
         for fact, index in [('mcp_runner_uid', 1), ('mcp_runner_primary_gid', 2)]:
             self.assertIn(f'{fact}: "{{{{ mcp_current_runner_passwd[{index}] | int }}}}"', identity)
@@ -363,6 +565,19 @@ class Source(unittest.TestCase):
         self.assertEqual(defaults['mcp_host_public_ips'], [])
         self.assertNotIn('mcp_runner_uid', defaults)
         self.assertNotIn('mcp_runner_primary_gid', defaults)
+
+    def test_endpoint_single_deployment_authority_and_downstream_interface(self):
+        definitions = []
+        for path in ROOT.rglob('*.yml'):
+            for line in path.read_text().splitlines():
+                if line.lstrip().startswith('mcp_production_endpoint:'):
+                    definitions.append(path.relative_to(ROOT).as_posix())
+        self.assertEqual(definitions, ['group_vars/all.yml'])
+        for path in [ROOT / 'module_utils/mcp_network.py', ROOT / 'library/mcp_network_plan.py']:
+            self.assertNotIn('8080', path.read_text())
+        documentation = (ROOT / 'README.md').read_text()
+        for consumer in ['mcp_production_endpoint', '#112', 'mcp-workspaced', 'Secure MCP Tunnel']:
+            self.assertIn(consumer, documentation)
 
 
 if __name__ == '__main__':

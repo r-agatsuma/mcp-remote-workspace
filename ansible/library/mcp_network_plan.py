@@ -8,7 +8,8 @@ import subprocess
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.mcp_network import (
-    direct_resolv_conf, inputs, literal, parse_save, persistence_defaults, ping_sysctl, render_rules, require,
+    direct_resolv_conf, inputs, literal, parse_save, persistence_defaults, ping_sysctl,
+    production_endpoint, render_rules, require,
 )
 
 
@@ -31,8 +32,9 @@ def command(argv, data=None):
     return subprocess.run(argv, input=data, text=True, capture_output=True, check=True).stdout
 
 
-def plan(uid, gid, resolvers, hosts):
+def plan(uid, gid, resolvers, hosts, endpoint):
     dns, hosts = inputs(uid, gid, resolvers, hosts)
+    endpoint = production_endpoint(endpoint)
     account = pwd.getpwnam('mcp-runner')
     require((account.pw_uid, account.pw_gid) == (uid, gid), 'S3A facts differ from actual account')
     nss = trusted_read('/etc/nsswitch.conf')
@@ -61,7 +63,7 @@ def plan(uid, gid, resolvers, hosts):
         path = '/etc/iptables/rules.v' + str(family)
         saved = trusted_read(path, optional=True)
         live = command(['/usr/sbin/' + name + '-nft-save'])
-        rendered = render_rules(live, saved, uid, family, hosts)
+        rendered = render_rules(live, saved, uid, family, hosts, endpoint)
         # Both families must parse before either persistent file is changed.
         command(['/usr/sbin/' + name + '-nft-restore', '--test'], rendered)
         files['v' + str(family)] = rendered
@@ -73,10 +75,12 @@ def main():
     module = AnsibleModule(argument_spec=dict(
         uid=dict(type='int', required=True), gid=dict(type='int', required=True),
         resolvers=dict(type='list', elements='str', required=True),
-        host_public_ips=dict(type='list', elements='str', required=True)), supports_check_mode=True)
+        host_public_ips=dict(type='list', elements='str', required=True),
+        # Preserve raw member types: integer coercion would accept string/bool ports.
+        endpoint=dict(type='dict', required=True)), supports_check_mode=True)
     try:
         result = plan(module.params['uid'], module.params['gid'], module.params['resolvers'],
-                      module.params['host_public_ips'])
+                      module.params['host_public_ips'], module.params['endpoint'])
         module.exit_json(changed=False, **result)
     except Exception as exc:
         module.fail_json(msg='STOP: ' + str(exc))

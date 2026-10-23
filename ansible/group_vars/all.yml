@@ -6,6 +6,11 @@ mcp_tunnel_user: mcp-tunnel
 mcp_source_path: /usr/local/src/mcp-workspaced
 mcp_go_toolchain: go1.26.9
 
+# Shared trusted production endpoint for the listener, Tunnel target and S3D.
+mcp_production_endpoint:
+  address: 127.0.0.1
+  port: 8080
+
 # S3B fixed reference paths; no bootstrap enable is stored in inventory.
 mcp_data_mount: /srv/mcp-podman
 mcp_runner_home: /srv/mcp-podman/runner
