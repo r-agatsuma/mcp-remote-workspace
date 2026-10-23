@@ -103,11 +103,26 @@ def inputs(uid, gid, resolvers, host_public_ips):
     return dns, hosts
 
 
-def runner_rules(uid, family, hosts):
+def production_endpoint(value):
+    require(type(value) is dict and set(value) == {'address', 'port'}, 'invalid production MCP endpoint')
+    require(value['address'] == '127.0.0.1', 'production MCP address must be exactly 127.0.0.1')
+    require(type(value['port']) is int and 1 <= value['port'] <= 65535,
+            'production MCP port must be an integer in 1..65535')
+    return value
+
+
+def runner_rules(uid, family, hosts, endpoint):
     require(type(uid) is int and 0 < uid < 2**31, 'invalid actual runner UID')
     require(family in (4, 6), 'invalid address family')
+    endpoint = production_endpoint(endpoint)
     start = f'-A OUTPUT -m owner --uid-owner {uid} -m comment --comment {MARKER} -j {CHAIN}'
-    rules = [f'-A {CHAIN} -m addrtype --dst-type LOCAL -j DROP']
+    rules = []
+    if family == 4:
+        address = endpoint['address']
+        rules.append(f'-A {CHAIN} -s {address}/32 -d {address}/32 -o lo -p tcp -m conntrack '
+                     f'--ctorigsrc {address} --ctorigdst {address} --ctorigdstport {endpoint["port"]} '
+                     '--ctdir REPLY -j ACCEPT')
+    rules.append(f'-A {CHAIN} -m addrtype --dst-type LOCAL -j DROP')
     if family == 4:
         # Directed broadcasts depend on assigned interface prefixes, not only
         # the fixed 255.255.255.255 limited-broadcast address.
@@ -120,8 +135,8 @@ def runner_rules(uid, family, hosts):
         address = literal(host)
         if address.version == family:
             rules.append(f'-A {CHAIN} -d {address}/{address.max_prefixlen} -j DROP')
-    # All deny decisions precede this family-neutral public protocol allowance.
-    # No ESTABLISHED, DNS, loopback, gateway or port-specific shortcut exists.
+    # Outside the exact production MCP reply above, all deny decisions precede
+    # this family-neutral public protocol allowance.
     rules.append(f'-A {CHAIN} -j ACCEPT')
     return start, rules
 
@@ -188,13 +203,13 @@ def unowned(tables):
     return result
 
 
-def render_rules(live, persistent, uid, family, hosts):
+def render_rules(live, persistent, uid, family, hosts, endpoint):
     base = unowned(parse_save(live))
     if persistent is not None:
         parsed = parse_save(persistent)
         require(bool(parsed), 'empty persistent rule file')
         require(base == unowned(parsed), 'live/persistent unrelated policy differs; operator reconciliation required')
-    hook, owned = runner_rules(uid, family, hosts)
+    hook, owned = runner_rules(uid, family, hosts, endpoint)
     lines = base['filter']
     declarations = [line for line in lines if line.startswith(':')]
     rules = [line for line in lines if not line.startswith(':')]

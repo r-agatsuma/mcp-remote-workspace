@@ -88,6 +88,7 @@
     gid: "{{ mcp_runner_primary_gid }}"
     resolvers: "{{ mcp_public_dns }}"
     host_public_ips: "{{ mcp_host_public_ips }}"
+    endpoint: "{{ mcp_production_endpoint }}"
   register: mcp_network_plan
 
 - name: Expose the validated ordered resolver interface for later S3E

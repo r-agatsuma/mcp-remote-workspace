@@ -343,8 +343,16 @@ reassigns identities. Supply these root/operator-owned inventory inputs:
 | --- | --- |
 | `mcp_public_dns` | Ordered list of 1–3 distinct native public-routable literal IPs; no hostnames, zones, mapped IPv6 or fallback |
 | `mcp_host_public_ips` | Complete list of the dedicated host's public IPs, including provider NAT/floating addresses absent from NICs; 1–64 distinct public literals |
+| `mcp_production_endpoint` | Shared production endpoint mapping in `group_vars/all.yml`: `address: 127.0.0.1`, `port: 8080` for the reference deployment; address must be exactly `127.0.0.1` and port an integer in `1..65535` |
 
-Both example lists are empty and intentionally fail. No resolver is a compiled
+The endpoint is the single trusted deployment source for S3D and later #112's
+`mcp-workspaced` listener and Secure MCP Tunnel local target. Those consumers
+must use the same mapping directly, without defining another endpoint default.
+The planner rejects malformed mappings, other addresses and non-integer ports
+(including strings and booleans), without coercion or fallback. Python rendering
+has no independent production port default.
+
+Both example IP lists are empty and intentionally fail. No resolver is a compiled
 or example deployment default. Reconcile the host list whenever provider address
 assignments change. Actual interface addresses are additionally denied through
 Netfilter's `addrtype LOCAL`, independent of inventory; a resolver matching a
@@ -354,10 +362,20 @@ deployment state, never workspace/Dockerfile input.
 The transient read-only Ansible planner validates inputs, snapshots
 `iptables-nft-save` / `ip6tables-nft-save`, and composes `/etc/iptables/rules.v4`
 and `rules.v6`. Each filter table gets exactly one marked numeric-UID OUTPUT hook
-before existing OUTPUT rules, and one reserved `MCP_S3D_OUTPUT` chain. Host/self
+before existing OUTPUT rules, and one reserved `MCP_S3D_OUTPUT` chain. IPv4 starts
+with exactly one production MCP reply exception derived from that endpoint:
+
+```text
+-A MCP_S3D_OUTPUT -s 127.0.0.1/32 -d 127.0.0.1/32 -o lo -p tcp -m conntrack --ctorigsrc 127.0.0.1 --ctorigdst 127.0.0.1 --ctorigdstport <configured-port> --ctdir REPLY -j ACCEPT
+```
+
+It immediately precedes the ordinary LOCAL DROP and existing destination policy.
+It matches an exact endpoint/tuple within the trusted host/control-plane boundary;
+it does not authenticate a PID, executable or specifically the Tunnel process.
+IPv6 gets no exception and still begins with LOCAL DROP. All other host/self
 and destination DROP rules precede the chain's terminal ACCEPT. IPv4 route-type
-broadcast destinations are also denied, including directed broadcasts. There is no
-early established-connection, DNS, gateway, protocol or port exception. Public
+broadcast destinations are also denied, including directed broadcasts. No generic
+stateful, loopback, DNS, gateway or port-only acceptance is added. Public
 TCP/UDP/ICMP/ICMPv6 are not restricted by a protocol whitelist. No port is
 published, no host network privilege is granted, and pasta remains connectivity
 and translation only.
