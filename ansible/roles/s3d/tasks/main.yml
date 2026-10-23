@@ -11,6 +11,18 @@
       - mcp_host_public_ips | length > 0
     fail_msg: 'STOP: S3D requires actual account facts, public DNS and all host public/NAT IPs.'
 
+- name: Validate trusted production MCP endpoint before host mutation
+  ansible.builtin.assert:
+    that:
+      - mcp_production_endpoint is defined
+      - mcp_production_endpoint is mapping
+      - mcp_production_endpoint | length == 2
+      - "'address' in mcp_production_endpoint and 'port' in mcp_production_endpoint"
+      - mcp_production_endpoint.address == '127.0.0.1'
+      - mcp_production_endpoint.port is integer
+      - mcp_production_endpoint.port >= 1 and mcp_production_endpoint.port <= 65535
+    fail_msg: 'STOP: production MCP endpoint requires exactly address 127.0.0.1 and an integer port in 1..65535.'
+
 - name: Inspect existing service authorities
   ansible.builtin.service_facts:
 

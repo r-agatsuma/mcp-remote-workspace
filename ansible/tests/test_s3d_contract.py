@@ -418,8 +418,11 @@ class Planner(unittest.TestCase):
                 self.run_plan(nss=nss)
 
     def test_shared_endpoint_reaches_renderer_and_invalid_input_stops_before_host_reads(self):
-        for port in [ENDPOINT['port'], 18443]:
-            result = self.run_plan(endpoint=dict(ENDPOINT, port=port))
+        for port in [1, ENDPOINT['port'], 18443, 65535]:
+            endpoint = dict(ENDPOINT, port=port)
+            with patch.object(planner, 'production_endpoint', wraps=network.production_endpoint) as validate:
+                result = self.run_plan(endpoint=endpoint)
+                validate.assert_called_once_with(endpoint)
             self.assertIn(reply_rule(port) + '\n', result['rules']['v4'])
             self.assertNotIn('--ctorigdstport', result['rules']['v6'])
         for endpoint in [dict(ENDPOINT, address='127.0.0.2'), dict(ENDPOINT, port='8080'),
@@ -452,6 +455,66 @@ class Planner(unittest.TestCase):
 
 
 class Source(unittest.TestCase):
+    def test_endpoint_preflight_precedes_every_host_mutation(self):
+        tasks = yaml.safe_load((ROOT / 'roles/s3d/tasks/main.yml').read_text())
+        index = next(i for i, task in enumerate(tasks)
+                     if task['name'] == 'Validate trusted production MCP endpoint before host mutation')
+        # All tasks through the unconditional preflight are assertion-only;
+        # no module, import, block or conditional can mutate/bypass this prefix.
+        for task in tasks[:index + 1]:
+            self.assertEqual(set(task), {'name', 'ansible.builtin.assert'})
+        first_mutation = next(i for i, task in enumerate(tasks) if 'ansible.builtin.debconf' in task)
+        self.assertLess(index, first_mutation)
+        self.assertTrue(all(set(task) <= {'name', 'ansible.builtin.assert', 'ansible.builtin.service_facts',
+                                         'loop', 'when'} for task in tasks[:first_mutation]))
+
+    @unittest.skipUnless(shutil.which('ansible-playbook'), 'ansible-playbook unavailable')
+    def test_real_ansible_endpoint_preflight_rejects_before_continuation(self):
+        production = yaml.safe_load((ROOT / 'roles/s3d/tasks/main.yml').read_text())
+        preflight = next(task for task in production
+                         if task['name'] == 'Validate trusted production MCP endpoint before host mutation')
+        cases = [('missing endpoint', {}, True)]
+
+        def case(name, endpoint, reject):
+            cases.append((name, {'mcp_production_endpoint': endpoint}, reject))
+
+        for port in [1, ENDPOINT['port'], 18443, 65535]:
+            case(f'valid integer port {port}', dict(ENDPOINT, port=port), False)
+        for index, endpoint in enumerate([None, [], '127.0.0.1:8080', {}, {'address': '127.0.0.1'},
+                                          {'port': 8080}, dict(ENDPOINT, extra=True),
+                                          {'address': '127.0.0.1', 'other': 8080}]):
+            case(f'invalid mapping {index}', endpoint, True)
+        for address in ['127.0.0.2', '127.1', '127.0.0.0/8', '0.0.0.0', '::1', 'localhost',
+                        '127.0.0.1/32', ' 127.0.0.1', None, 2130706433]:
+            case(f'invalid address {address!r}', dict(ENDPOINT, address=address), True)
+        for port in [None, True, False, '8080', '1', 8080.0, 1.5, 0, -1, 65536, [], {}]:
+            case(f'invalid port {port!r}', dict(ENDPOINT, port=port), True)
+
+        plays = []
+        for name, values, reject in cases:
+            plays.append({'name': name, 'hosts': 'localhost', 'connection': 'local',
+                'gather_facts': False, 'become': False, 'vars': values, 'tasks': [
+                    {'ansible.builtin.set_fact': {'preflight_rejected': False, 'after_preflight': False}},
+                    {'block': [preflight, {'ansible.builtin.set_fact': {'after_preflight': True}}],
+                     'rescue': [{'ansible.builtin.set_fact': {
+                         'preflight_rejected': True,
+                         'failed_task': '{{ ansible_failed_task.name }}',
+                         'failed_message': '{{ ansible_failed_result.msg }}'}}]},
+                    {'ansible.builtin.assert': {'that': [
+                        'preflight_rejected == ' + ('true' if reject else 'false'),
+                        'after_preflight == ' + ('false' if reject else 'true'),
+                        'not preflight_rejected or failed_task == expected_task',
+                        'not preflight_rejected or failed_message == expected_message'],
+                     }, 'vars': {'expected_task': preflight['name'],
+                                 'expected_message': preflight['ansible.builtin.assert']['fail_msg']}}]})
+        with tempfile.TemporaryDirectory(prefix='s3d-endpoint-preflight-') as directory:
+            path = Path(directory) / 'contract.yml'
+            path.write_text(yaml.safe_dump(plays, sort_keys=False))
+            result = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(path)],
+                                    env={**os.environ, 'ANSIBLE_NOCOLOR': '1'},
+                                    text=True, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which('ansible-playbook'), 'ansible-playbook unavailable')
     def test_real_ansible_identity_input_assertion_and_downstream_fact(self):
         production = yaml.safe_load((ROOT / 'roles/s3d/tasks/main.yml').read_text())
