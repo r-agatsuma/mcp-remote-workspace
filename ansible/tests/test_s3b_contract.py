@@ -331,7 +331,7 @@ class SourceContract(unittest.TestCase):
                         modules.add(key)
 
         site = yaml.safe_load((ROOT / 'site.yml').read_text())
-        self.assertEqual(site[0]['roles'], ['s3a', 's3b', 's3c', 's3d'])
+        self.assertEqual(site[0]['roles'], ['s3a', 's3b', 's3c', 's3d', 's3e'])
         for role in site[0]['roles']:
             tasks(ROOT / 'roles' / role / 'tasks/main.yml')
         all_source = '\n'.join(p.read_text() for p in visited)

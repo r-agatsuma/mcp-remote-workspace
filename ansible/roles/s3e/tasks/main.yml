@@ -1,0 +1,124 @@
+---
+- name: Validate service configuration and derive the single shared argument vector
+  ansible.builtin.import_tasks: configuration.yml
+
+- name: Inspect root-owned service deployment paths without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  loop:
+    - /usr/local/lib
+    - /usr/local/lib/mcp-workspaced
+    - /usr/local/lib/mcp-tunnel
+    - /usr/local/lib/mcp-tunnel/v0.0.16
+    - /etc/systemd/system
+    - /etc/mcp-tunnel
+  register: mcp_service_paths
+
+- name: Refuse unsafe existing deployment directories
+  ansible.builtin.assert:
+    that:
+      - item.stat.isdir and not item.stat.islnk
+      - item.stat.uid == 0
+      - item.stat.mode[-2] not in ['2', '3', '6', '7']
+      - item.stat.mode[-1] not in ['2', '3', '6', '7']
+    fail_msg: 'STOP: unsafe service deployment directory.'
+  loop: "{{ mcp_service_paths.results }}"
+  when: item.stat.exists
+
+- name: Create root-owned executable directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /usr/local/lib/mcp-workspaced
+    - /usr/local/lib/mcp-tunnel
+    - /usr/local/lib/mcp-tunnel/v0.0.16
+
+- name: Establish the non-secret configuration directory without touching the key
+  ansible.builtin.file:
+    path: /etc/mcp-tunnel
+    state: directory
+    owner: root
+    group: mcp-tunnel
+    mode: '0750'
+
+- name: Validate Human-staged credential metadata before service operation
+  ansible.builtin.import_tasks: secret.yml
+
+- name: Fetch only the three exact official release assets with pinned digests
+  ansible.builtin.get_url:
+    url: "https://github.com/openai/tunnel-client/releases/download/v0.0.16/{{ item.name }}"
+    dest: "/usr/local/lib/mcp-tunnel/v0.0.16/{{ item.name }}"
+    checksum: "sha256:{{ item.sha256 }}"
+    owner: root
+    group: root
+    mode: '0644'
+    timeout: 60
+  loop:
+    - name: tunnel-client-v0.0.16-linux-arm64.zip
+      sha256: 963d0384aaa7c798778479c45673f9051a4039dd891aef8f8978d2a1a628b74f
+    - name: SHA256SUMS.txt
+      sha256: fcce864a5935655534cc3d981257509579dbb5c71dbaec64c17a157ca9d65e56
+    - name: tunnel-client-v0.0.16-provenance.sigstore.json
+      sha256: adae10fe6a877d05bee25f4d5fc2c0623c76189ac5af7387efa1c0152e16d3ab
+
+- name: Install the pinned archive extractor using the existing Python standard library
+  ansible.builtin.copy:
+    src: install-tunnel.py
+    dest: /usr/local/lib/mcp-tunnel/install-tunnel
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Verify all three assets again and install only the client and license material
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, -I, /usr/local/lib/mcp-tunnel/install-tunnel]
+  register: mcp_tunnel_install
+  changed_when: mcp_tunnel_install.stdout == 'installed'
+
+- name: Render root-owned service and recovery source
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {src: prerequisites.py.j2, dest: /usr/local/lib/mcp-workspaced/service-prerequisites, mode: '0755'}
+    - {src: recover.py.j2, dest: /usr/local/lib/mcp-workspaced/recover, mode: '0755'}
+    - {src: tunnel-preflight.py.j2, dest: /usr/local/lib/mcp-tunnel/preflight, mode: '0755'}
+    - {src: mcp-workspaced.service.j2, dest: /etc/systemd/system/mcp-workspaced.service, mode: '0644'}
+    - {src: mcp-tunnel.service.j2, dest: /etc/systemd/system/mcp-tunnel.service, mode: '0644'}
+  register: mcp_service_render
+
+- name: Render non-secret Tunnel configuration with a file reference only
+  ansible.builtin.template:
+    src: tunnel.yaml.j2
+    dest: /etc/mcp-tunnel/tunnel.yaml
+    owner: root
+    group: mcp-tunnel
+    mode: '0640'
+  register: mcp_tunnel_config_render
+
+- name: Reload production unit definitions
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Enable and converge the local product service
+  ansible.builtin.systemd_service:
+    name: mcp-workspaced.service
+    enabled: true
+    state: "{{ 'restarted' if (mcp_service_render.changed or mcp_application_install.changed) else 'started' }}"
+
+- name: Enable and converge Tunnel only through its metadata and local-readiness gates
+  ansible.builtin.systemd_service:
+    name: mcp-tunnel.service
+    enabled: true
+    state: "{{ 'restarted' if (mcp_service_render.changed or mcp_application_install.changed or mcp_tunnel_config_render.changed or mcp_tunnel_install.changed) else 'started' }}"

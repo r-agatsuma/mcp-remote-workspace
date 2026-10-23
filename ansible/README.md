@@ -1,12 +1,12 @@
-# S3 deployment source (S3A + S3B + S3C + S3D)
+# S3 deployment source (S3A + S3B + S3C + S3D + S3E)
 
 This tree targets Ubuntu 24.04 on arm64. It creates the unprivileged
 `mcp-runner` and `mcp-tunnel` system accounts, then installs the application
 from an explicitly selected repository commit. S3B adds the verified Data mount
 and rootless runtime placement described below. S3C provisions the unattended
 user manager and checks its cgroup authority. S3D adds the root-owned persistent
-destination policy and direct trusted resolver view. Production services and
-Tunnel wiring remain later slices.
+destination policy and direct trusted resolver view. S3E adds the production
+services, shared trusted recovery configuration and pinned Tunnel installation.
 
 Before a deployment, copy `inventory/hosts.example.yml` and replace its
 documentation-only address and operator account. Set `mcp_source_revision` in
@@ -67,7 +67,7 @@ checks do not prove host convergence or runtime behavior.
 
 ## S3B Data and rootless runtime contract
 
-`site.yml` runs S3A, S3B, S3C, then S3D. It never imports `bootstrap-data.yml`, the
+`site.yml` runs S3A, S3B, S3C, S3D, then S3E. It never imports `bootstrap-data.yml`, the
 `data_bootstrap` role or `mcp_data_bootstrap` module. Ordinary convergence
 contains no partition/format/signature-erasure/tune/repair action. The shared
 inspector invokes `wipefs --no-act --json` only to read signatures. Missing,
@@ -467,3 +467,160 @@ Actual filtering, pasta composition, workspace isolation, IPv6 routing, metadata
 blocking, reboot persistence, Podman/image-fetch DNS, cache and namespace
 behavior, daemon public-DNS runtime behavior and OCI E2E remain unverified at
 this Author/source checkpoint. Independent source review is a later checkpoint.
+
+## S3E production services and trusted recovery
+
+S3E installs `mcp-workspaced.service` as `mcp-runner` and `mcp-tunnel.service`
+as `mcp-tunnel`. Set `mcp_canonical_image` to the canonical image's exact
+`@sha256:<64 lowercase hex>` reference and `mcp_tunnel_id` to the deployment's
+`tunnel_<32 lowercase hex>` ID. The checked-in placeholders deliberately fail.
+The image must already exist in the runner's local store; S3E does not pull it
+or create a Tunnel object. The non-secret `mcp_production_endpoint` mapping
+supplies S3D's exact reply rule, the daemon listener and the Tunnel `main`
+channel. No second production endpoint default exists.
+
+`group_vars/all.yml` owns one `mcp_workspaced_config` mapping, with all exposed
+shared CLI policy values explicitly selected from the application's current
+reference policy. It derives state/Data paths from S3B and ordered DNS from
+S3D. Configuration tasks validate this complete mapping and generate exactly
+one `mcp_workspaced_argv` vector. Both the daemon unit and the root-owned recovery
+launcher render that vector; neither maintains a second flag/value list.
+The same S3B/S3C environment supplies HOME, XDG placement, TMPDIR, PATH and the
+actual-UID runtime/bus address. Unsupported/missing fields, unpinned images,
+alternate paths and invalid policy fail before service installation.
+
+The daemon runs `/usr/local/bin/mcp-workspaced -daemon -mcp-listen ...` in
+`system.slice`, outside finite build parents. It requires and binds its lifetime
+to the S3B Data mount/verification unit, actual-UID user manager and
+`netfilter-persistent.service`, and orders after `systemd-sysctl.service`.
+Its unprivileged read-only preflight additionally verifies prerequisite active
+states, mounted Data, runtime/bus metadata, user-manager cgroup/controllers,
+the exact trusted resolver view and exact primary-GID ping range. It neither
+repairs host state nor installs another network/cgroup authority. Root-managed
+firewall loading remains the S3D distribution service's responsibility.
+
+Both services have a 15-second stop limit, a 10-second failure restart delay,
+and at most three starts per 300-second interval. `Type=exec` establishes only
+process supervision. It does not assert MCP or Tunnel readiness. Application
+replacement is registered by S3A so a changed binary also restarts the consumers.
+No rootless-runtime-breaking `NoNewPrivileges` setting is imposed on the runner;
+the Tunnel service has no capabilities and uses `NoNewPrivileges` and a read-only
+filesystem view.
+
+Service stdout/stderr persistence is **prohibited** (`StandardOutput=null`,
+`StandardError=null`) rather than becoming a caller-induced Boot-volume sink.
+This intentionally gives up persistent process-output diagnostics. Application
+generation diagnostics remain the existing bounded Data files, trusted recovery
+inspection still writes to the operator's terminal, and systemd retains unit
+state/exit status. The Tunnel UI's in-memory event buffer is limited to 100 events;
+raw HTTP logging is disabled and no log file is configured. No host-wide journald
+retention policy or extra logging daemon is introduced.
+
+### Bounded recovery entry
+
+After explicitly stopping the daemon, an authorized operator invokes the
+root-owned `/usr/local/lib/mcp-workspaced/recover` launcher as `mcp-runner`:
+
+```sh
+sudo systemctl stop mcp-workspaced.service
+sudo -u mcp-runner /usr/local/lib/mcp-workspaced/recover inspect
+sudo -u mcp-runner /usr/local/lib/mcp-workspaced/recover backend "$BACKEND_SELECTION"
+sudo -u mcp-runner /usr/local/lib/mcp-workspaced/recover storage
+sudo -u mcp-runner /usr/local/lib/mcp-workspaced/recover cleanup "$GENERATION_SELECTION"
+```
+
+These are separate operator-selected actions, not a script to run in sequence.
+Selections come only from the application's inspection output. The launcher
+accepts no alternate flags, configuration path, environment override or command.
+It requires the runner's actual UID/GID, a loaded inactive/failed daemon with
+zero MainPID and no queued job, and the same service prerequisites. It never
+stops a daemon implicitly or grants the runner sudo. The operator's existing
+authority performs the user switch; the launcher itself has no privilege.
+
+Recovery execs the same application with the shared arguments and a replaced
+explicit environment. The application's two-minute recovery deadline,
+account-wide singleton, reconciliation, boot-epoch evidence and exact selection
+checks remain authoritative. A racing start fails at that singleton; the launcher
+does not bypass or replace it. No journal edits, arbitrary deletion, global prune
+or automatic lifecycle repair are added. Stopping the daemon also stops its
+bound Tunnel; later restart is an explicit operator action.
+
+### Fixed Tunnel artifact and metadata-only credential boundary
+
+The role downloads these exact
+[official v0.0.16 release assets](https://github.com/openai/tunnel-client/releases/tag/v0.0.16):
+
+| Asset | SHA-256 |
+| --- | --- |
+| `tunnel-client-v0.0.16-linux-arm64.zip` | `963d0384aaa7c798778479c45673f9051a4039dd891aef8f8978d2a1a628b74f` |
+| `SHA256SUMS.txt` | `fcce864a5935655534cc3d981257509579dbb5c71dbaec64c17a157ca9d65e56` |
+| `tunnel-client-v0.0.16-provenance.sigstore.json` | `adae10fe6a877d05bee25f4d5fc2c0623c76189ac5af7387efa1c0152e16d3ab` |
+
+Ansible `get_url` checks every digest. A Python-standard-library installer checks
+all three again before extracting the client and license material into the
+root-owned `/usr/local/lib/mcp-tunnel/v0.0.16/` directory. It does not execute the
+binary, install the bundled Cloudflare companion, resolve `latest`, or add a
+signature tool. This verifies the task's pinned provenance **bytes**, not Sigstore
+signature/identity semantics. A version or pin change requires another explicit
+deployment revision.
+
+Human must separately stage `/etc/mcp-tunnel/control-plane-api-key` as a regular
+`mcp-tunnel:mcp-tunnel` mode `0600` file. Its directory is `root:mcp-tunnel` mode
+`0750`. Ansible may establish the non-secret directory, but never creates or
+transports the key. Missing/wrong metadata stops deployment before any S3E
+service operation. The `stat` tasks use `follow: false`, `get_checksum: false`,
+`get_mime: false` and `get_attributes: false`; only metadata is registered.
+Readability is checked as `mcp-tunnel`, and `test -r` must deny `mcp-runner` without
+opening the file. S3A's separate UID/GID and private-group checks remain required.
+No ACL or supplementary group grants the runner access.
+
+The root-owned `0640` non-secret `/etc/mcp-tunnel/tunnel.yaml` uses exactly
+`control_plane.api_key: file:/etc/mcp-tunnel/control-plane-api-key`.
+Each Tunnel start repeats the metadata-only checks as `mcp-tunnel`. Only the
+official client resolves the runtime secret at execution. Its environment is
+cleared with `env -i`; ambient API-key, proxy and configuration values cannot
+override the file-based configuration. There is no secret value in deployment
+variables, argv, shell startup files, templates or tests.
+
+### Local readiness and remaining evidence
+
+The [v0.0.16 configuration contract](https://github.com/openai/tunnel-client/blob/v0.0.16/docs/configuration.md)
+supports the file reference and `mcp.startup_wait_timeout`. It also explicitly
+states that polling resumes after the native wait times out. Therefore the
+60-second native wait alone is insufficient for S3E's fail-closed startup.
+
+Before `run`, an unprivileged preflight waits at most 60 seconds for the exact
+local TCP listener, retrying only connection refusal. The landed application
+binds that socket only after open/reconciliation. The supported v0.0.16
+[`doctor` command](https://github.com/openai/tunnel-client/blob/v0.0.16/cmd/client/doctor_command.go)
+then must exit successfully: it checks local reachability/configuration,
+optional OAuth metadata and health-listener availability without polling the
+Tunnel control plane. Both are mandatory `ExecStartPre` commands under a
+90-second systemd start limit. A failed wait, failed doctor or timeout prevents
+`run` entirely. The native 60-second wait remains configured, and the unit is
+bound to the daemon's lifetime. Neither an early process spawn nor a failed
+startup probe is accepted as local readiness.
+
+The health/admin listener explicitly uses `127.0.0.1:0`, avoiding collision with
+the deployment-owned MCP port; remote UI and browser launch are disabled. Its
+ephemeral port is an operator-local diagnostic surface, not an MCP endpoint or
+a remote readiness assertion.
+
+The Python suite invokes only configuration/render/assertion Ansible tasks on
+localhost with synthetic facts. It compares every effective daemon/recovery
+argument, two UIDs/endpoints and changed policies; rejects malformed inputs;
+tests recovery gating and exact exec with mocked process interfaces; tests
+secret metadata without content fixtures; tests delayed/refused/timed-out local
+startup with mocked sockets; checks pinned installation idempotence and corrupt
+asset rejection in a temporary tree; and parses rendered units with
+`systemd-analyze verify` using a synthetic root. It never starts a real unit,
+runs the Tunnel client, contacts OCI, or stages/opens a real credential.
+
+Run the source checks listed above, including `site.yml` / `bootstrap-data.yml`
+syntax checks, local `tests/revision_contract.yml`, the full Python suite,
+`go mod verify`, Go tests/vet/build, and `git diff --check`. Actual systemd
+startup/restart, target permissions, runtime cgroups/network/DNS, Data pressure,
+installed-client execution and Tunnel/ChatGPT interoperability remain I1/I2.
+This source checkpoint and any synthetic result do not establish Tunnel READY
+or real-host PASS. S3F operational consolidation and independent source review
+are separate tasks.

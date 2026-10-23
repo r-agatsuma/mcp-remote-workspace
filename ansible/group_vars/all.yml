@@ -38,3 +38,28 @@ mcp_public_dns: []
 # All host public addresses, including provider NAT/floating addresses that are
 # not assigned to a NIC. Interface-local addresses are also denied dynamically.
 mcp_host_public_ips: []
+
+# S3E: the only shared daemon/recovery configuration authority. ReferencePolicy
+# values are deployment policy; image and Tunnel ID must be supplied by operator.
+mcp_canonical_image: REPLACE_WITH_CANONICAL_IMAGE_AT_SHA256
+mcp_tunnel_id: REPLACE_WITH_TUNNEL_ID
+mcp_workspaced_config:
+  image: "{{ mcp_canonical_image }}"
+  state-dir: "{{ mcp_workspace_state_dir }}"
+  data-dir: "{{ mcp_workspace_data_dir }}"
+  podman: /usr/bin/podman
+  public-dns: "{{ mcp_public_dns_validated }}"
+  tool-timeout: 30s
+  memory-bytes: 4294967296
+  max-generations: 2
+  swap-bytes: 0
+  cpu-quota: -1
+  cpu-weight: 100
+  pids-max: 512
+  migration-tasks-max: 513
+  nofile: 1024
+  max-backend-operations: 4
+  idle-ttl: 30m
+  absolute-ttl: 24h
+  min-available-bytes: 1073741824
+  min-free-inodes: 1024

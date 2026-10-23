@@ -1,0 +1,37 @@
+[Unit]
+Description=Official pinned Secure MCP Tunnel to reconciled local MCP
+Requires=mcp-workspaced.service
+After=mcp-workspaced.service
+BindsTo=mcp-workspaced.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=mcp-tunnel
+Group=mcp-tunnel
+UMask=0077
+WorkingDirectory=/
+# env -i prevents ambient config/key/proxy overrides. The key is loaded only
+# by the official runtime from the protected file reference, never by Ansible.
+ExecStartPre=/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I /usr/local/lib/mcp-tunnel/preflight
+ExecStartPre=/usr/bin/env -i PATH=/usr/bin:/bin /usr/local/lib/mcp-tunnel/v0.0.16/tunnel-client doctor --config /etc/mcp-tunnel/tunnel.yaml
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin /usr/local/lib/mcp-tunnel/v0.0.16/tunnel-client run --config /etc/mcp-tunnel/tunnel.yaml
+# v0.0.16 resumes polling after its native startup-wait timeout. The bounded
+# preflight and supported doctor must succeed BEFORE run may execute.
+TimeoutStartSec=90s
+TimeoutStopSec=15s
+Restart=on-failure
+RestartSec=10s
+KillMode=control-group
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
