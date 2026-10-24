@@ -1,0 +1,56 @@
+#!/usr/bin/python3
+"""Unprivileged, metadata-only credential check and bounded local TCP wait."""
+import os
+from pathlib import Path
+import pwd
+import socket
+import stat
+import sys
+import time
+
+ENDPOINT = ({{ mcp_production_endpoint.address | to_json }}, {{ mcp_production_endpoint.port }})
+WAIT_SECONDS = 60
+
+
+def secret_metadata():
+    account = pwd.getpwnam('mcp-tunnel')
+    if os.getuid() != account.pw_uid or os.geteuid() != account.pw_uid or account.pw_uid == 0:
+        raise ValueError('wrong Tunnel identity')
+    if os.getgid() != account.pw_gid or set(os.getgroups()) - {account.pw_gid}:
+        raise ValueError('unexpected Tunnel groups')
+    directory = Path('/etc/mcp-tunnel').lstat()
+    if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0
+            or directory.st_gid != account.pw_gid or stat.S_IMODE(directory.st_mode) != 0o750):
+        raise ValueError('unsafe credential directory')
+    key = Path('/etc/mcp-tunnel/control-plane-api-key')
+    metadata = key.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != account.pw_uid
+            or metadata.st_gid != account.pw_gid or stat.S_IMODE(metadata.st_mode) != 0o600
+            or not os.access(key, os.R_OK, effective_ids=True)):
+        raise ValueError('unsafe credential metadata')
+    # No open/read/checksum/MIME operation on the key. The official client
+    # resolves the reference later, under this same unprivileged identity.
+
+
+def wait_local():
+    deadline = time.monotonic() + WAIT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('local MCP startup deadline exceeded')
+        try:
+            with socket.create_connection(ENDPOINT, timeout=min(1, remaining)):
+                return
+        except ConnectionRefusedError:
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+        # Other errors do not authorize retries or control-plane operation.
+
+
+if __name__ == '__main__':
+    try:
+        if len(sys.argv) != 1:
+            raise ValueError('no arguments accepted')
+        secret_metadata()
+        wait_local()
+    except (OSError, ValueError, KeyError):
+        sys.exit('STOP: Tunnel metadata or local MCP startup gate failed')

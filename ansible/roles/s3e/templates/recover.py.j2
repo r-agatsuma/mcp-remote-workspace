@@ -1,0 +1,48 @@
+#!/usr/bin/python3 -I
+"""Bounded trusted recovery launcher; invoke explicitly as mcp-runner."""
+import os
+import re
+import subprocess
+import sys
+
+ENVIRONMENT = {{ mcp_service_environment | to_json }}
+SHARED_ARGV = {{ mcp_workspaced_argv | to_json }}
+UID = {{ mcp_runner_uid }}
+GID = {{ mcp_runner_primary_gid }}
+
+
+def recovery_args(args):
+    if args in [['inspect'], ['storage']]:
+        return ['-recover', args[0]]
+    if len(args) == 2 and args[0] in ['backend', 'cleanup'] and re.fullmatch('[0-9a-f]{64}', args[1]):
+        return ['-recover', args[0], '-recovery-selection', args[1]]
+    raise ValueError('expected inspect|storage or backend|cleanup EXACT_SELECTION')
+
+
+def launch(args):
+    mode = recovery_args(args)
+    if os.getuid() != UID or os.geteuid() != UID or os.getgid() != GID:
+        raise ValueError('run recovery as mcp-runner')
+    # Do not stop a daemon implicitly. Unknown/activating/deactivating/queued
+    # state fails. The application singleton remains the final race arbiter.
+    result = subprocess.run(
+        ['/usr/bin/systemctl', 'show', '--property=LoadState,ActiveState,MainPID,Job',
+         '--', 'mcp-workspaced.service'],
+        env=ENVIRONMENT, check=True, capture_output=True, text=True, timeout=3)
+    status = dict(line.split('=', 1) for line in result.stdout.splitlines())
+    if (status.get('LoadState') != 'loaded' or status.get('ActiveState') not in ['inactive', 'failed']
+            or status.get('MainPID') != '0' or status.get('Job') != ''):
+        raise ValueError('stop daemon and relinquish singleton ownership first')
+    subprocess.run(['/usr/bin/python3', '-I', '/usr/local/lib/mcp-workspaced/service-prerequisites'],
+                   env=ENVIRONMENT, check=True, timeout=30)
+    # No shell, arbitrary flags, alternate environment, lock/journal edits or
+    # second lifecycle authority. The landed CLI owns its two-minute deadline.
+    os.execve('/usr/local/bin/mcp-workspaced',
+              ['/usr/local/bin/mcp-workspaced', *mode, *SHARED_ARGV], ENVIRONMENT)
+
+
+if __name__ == '__main__':
+    try:
+        launch(sys.argv[1:])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        sys.exit('STOP: invalid recovery request, active daemon, or failed prerequisite')

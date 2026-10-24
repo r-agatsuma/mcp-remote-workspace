@@ -43,7 +43,7 @@ def fixture(uid):
 class SourceContract(unittest.TestCase):
     def test_only_existing_unprivileged_manager_and_no_new_unit_or_helper(self):
         site = yaml.safe_load((ROOT / 'site.yml').read_text())
-        self.assertEqual(site[0]['roles'], ['s3a', 's3b', 's3c', 's3d'])
+        self.assertEqual(site[0]['roles'], ['s3a', 's3b', 's3c', 's3d', 's3e'])
         tasks = yaml.safe_load((TASKS / 'main.yml').read_text())
         modules = []
         for path in TASKS.glob('*.yml'):

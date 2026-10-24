@@ -1,0 +1,72 @@
+---
+- name: Require the landed cross-slice service interfaces and fixed loopback endpoint
+  ansible.builtin.assert:
+    that:
+      - mcp_runner_account == 'mcp-runner' and mcp_tunnel_account == 'mcp-tunnel'
+      - mcp_runner_uid | int > 0 and mcp_runner_primary_gid | int > 0
+      - mcp_production_endpoint is mapping
+      - mcp_production_endpoint | length == 2
+      - mcp_production_endpoint.address == '127.0.0.1'
+      - mcp_production_endpoint.port is integer
+      - mcp_production_endpoint.port >= 1 and mcp_production_endpoint.port <= 65535
+      - mcp_user_manager_unit == 'user@' + (mcp_runner_uid | string) + '.service'
+      - mcp_service_environment.HOME == mcp_runner_home
+      - mcp_service_environment.XDG_RUNTIME_DIR == '/run/user/' + (mcp_runner_uid | string)
+      - mcp_service_environment.DBUS_SESSION_BUS_ADDRESS == 'unix:path=/run/user/' + (mcp_runner_uid | string) + '/bus'
+      - mcp_data_ready_unit == 'mcp-data-ready.service'
+      - mcp_tunnel_id is match('^tunnel_[0-9a-f]{32}\Z')
+    fail_msg: 'STOP: S3E requires the landed S3A-D interfaces and an explicit Tunnel ID.'
+
+- name: Require the complete shared configuration without extra flags or alternate paths
+  ansible.builtin.assert:
+    that:
+      - mcp_workspaced_config is mapping
+      - mcp_workspaced_config.keys() | sort == ['absolute-ttl', 'cpu-quota', 'cpu-weight', 'data-dir', 'idle-ttl', 'image', 'max-backend-operations', 'max-generations', 'memory-bytes', 'migration-tasks-max', 'min-available-bytes', 'min-free-inodes', 'nofile', 'pids-max', 'podman', 'public-dns', 'state-dir', 'swap-bytes', 'tool-timeout']
+      - mcp_workspaced_config['state-dir'] == mcp_workspace_state_dir
+      - mcp_workspaced_config['data-dir'] == mcp_workspace_data_dir
+      - mcp_workspaced_config.podman == '/usr/bin/podman'
+      - mcp_workspaced_config.image is match('^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}\Z')
+      - mcp_workspaced_config['public-dns'] == mcp_public_dns_validated
+      - mcp_public_dns_validated | length >= 1 and mcp_public_dns_validated | length <= 3
+    fail_msg: 'STOP: incomplete or divergent daemon/recovery configuration.'
+
+- name: Require finite integer resource and storage policy
+  ansible.builtin.assert:
+    that:
+      - mcp_workspaced_config[item] is integer
+      - mcp_workspaced_config[item] > 0
+      - mcp_workspaced_config[item] < 9223372036854775807
+  loop: [memory-bytes, max-generations, cpu-weight, pids-max, migration-tasks-max, nofile, max-backend-operations, min-available-bytes, min-free-inodes]
+
+- name: Require the application resource-policy relationships
+  ansible.builtin.assert:
+    that:
+      - mcp_workspaced_config['swap-bytes'] is integer
+      - mcp_workspaced_config['swap-bytes'] >= 0
+      - mcp_workspaced_config['swap-bytes'] + mcp_workspaced_config['memory-bytes'] <= 9223372036854775807
+      - mcp_workspaced_config['cpu-quota'] is integer
+      - mcp_workspaced_config['cpu-quota'] == -1 or (mcp_workspaced_config['cpu-quota'] > 0 and mcp_workspaced_config['cpu-quota'] < 9223372036854775807)
+      - mcp_workspaced_config['cpu-weight'] <= 10000
+      - mcp_workspaced_config['migration-tasks-max'] == mcp_workspaced_config['pids-max'] + 1
+
+- name: Require bounded positive deployment durations
+  ansible.builtin.assert:
+    that:
+      - mcp_workspaced_config[item] is string
+      - mcp_workspaced_config[item] is match('^[1-9][0-9]{0,5}(ms|s|m|h)\Z')
+  loop: [tool-timeout, idle-ttl, absolute-ttl]
+
+- name: Initialize the shared argument vector once
+  ansible.builtin.set_fact:
+    mcp_workspaced_argv: []
+
+- name: Render every non-DNS shared value from the one mapping
+  ansible.builtin.set_fact:
+    mcp_workspaced_argv: "{{ mcp_workspaced_argv + ['-' + item.key, item.value | string] }}"
+  loop: "{{ mcp_workspaced_config | dict2items }}"
+  when: item.key != 'public-dns'
+
+- name: Append the same S3D ordered public resolver values
+  ansible.builtin.set_fact:
+    mcp_workspaced_argv: "{{ mcp_workspaced_argv + ['-public-dns', item] }}"
+  loop: "{{ mcp_workspaced_config['public-dns'] }}"

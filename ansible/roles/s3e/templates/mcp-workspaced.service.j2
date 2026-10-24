@@ -1,0 +1,34 @@
+[Unit]
+Description=Reconciled loopback MCP workspace service
+Requires={{ mcp_data_ready_unit }} {{ mcp_user_manager_unit }} netfilter-persistent.service systemd-sysctl.service
+After={{ mcp_data_mount_unit }} {{ mcp_data_ready_unit }} {{ mcp_user_manager_unit }} netfilter-persistent.service systemd-sysctl.service
+BindsTo={{ mcp_data_mount_unit }} {{ mcp_data_ready_unit }} {{ mcp_user_manager_unit }} netfilter-persistent.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=mcp-runner
+Group=mcp-runner
+Slice=system.slice
+UMask=0077
+WorkingDirectory={{ mcp_runner_home }}
+{% for key, value in mcp_service_environment.items() %}
+Environment="{{ key }}={{ value }}"
+{% endfor %}
+ExecStartPre=/usr/bin/python3 -I /usr/local/lib/mcp-workspaced/service-prerequisites
+ExecStart=/usr/local/bin/mcp-workspaced -daemon -mcp-listen {{ mcp_production_endpoint.address }}:{{ mcp_production_endpoint.port }}{% for arg in mcp_workspaced_argv %} "{{ arg }}"{% endfor %}
+
+# Type=exec is process supervision, not MCP readiness. Tunnel has its own gate.
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+KillMode=control-group
+# Prohibit caller-induced persistent service-output sinks on Boot. Product
+# generation diagnostics remain bounded Data files; no host-wide log policy.
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

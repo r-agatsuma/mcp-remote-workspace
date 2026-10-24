@@ -1,5 +1,5 @@
 ---
-- name: Establish deployment foundation, Data, rootless runtime, user manager and network
+- name: Establish production deployment prerequisites and services
   hosts: mcp_hosts
   become: true
   gather_facts: true
@@ -8,3 +8,4 @@
     - s3b
     - s3c
     - s3d
+    - s3e
