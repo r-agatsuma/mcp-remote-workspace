@@ -1,4 +1,8 @@
-# S3 deployment source (S3A + S3B + S3C + S3D + S3E)
+# S3 deployment source (S3A–S3F)
+
+Start with the [operator runbook](../docs/operations.md) for supported procedures,
+recovery, secret staging and evidence boundaries. Run `./scripts/verify-source`
+from the repository root for the consolidated local source/static checks.
 
 This tree targets Ubuntu 24.04 on arm64. It creates the unprivileged
 `mcp-runner` and `mcp-tunnel` system accounts, then installs the application
@@ -622,5 +626,5 @@ syntax checks, local `tests/revision_contract.yml`, the full Python suite,
 startup/restart, target permissions, runtime cgroups/network/DNS, Data pressure,
 installed-client execution and Tunnel/ChatGPT interoperability remain I1/I2.
 This source checkpoint and any synthetic result do not establish Tunnel READY
-or real-host PASS. S3F operational consolidation and independent source review
-are separate tasks.
+or real-host PASS. Independent source review and later runtime acceptance remain
+separate checkpoints.

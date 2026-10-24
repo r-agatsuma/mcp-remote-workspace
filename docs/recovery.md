@@ -51,12 +51,11 @@ same `workspace.Open`, reconciliation and account-wide singleton; a competing
 process fails before runtime discovery. This mode has no listener and is mutually
 exclusive with `-daemon` and `-smoke`. It is absent from the five-tool MCP surface.
 
-Example inspection (use the deployment's actual values and policy flags):
+For the S3 deployment, follow the [operator runbook](operations.md#exclusive-trusted-recovery).
+Stop the daemon first and use the installed shared-configuration launcher:
 
 ```sh
-mcp-workspaced -recover inspect \
-  -state-dir "$STATE_DIR" -data-dir "$DATA_DIR" \
-  -image "$CANONICAL_IMAGE" -public-dns "$PUBLIC_DNS_PRIMARY"
+sudo -u mcp-runner /usr/local/lib/mcp-workspaced/recover inspect
 ```
 
 Inspection emits bounded JSON containing only journal-owned backend operations,
@@ -67,9 +66,7 @@ OpenAI subject/session, workload output or arbitrary runtime inventory.
 Use the displayed `operations[].selection` for one backend recovery:
 
 ```sh
-mcp-workspaced -recover backend -recovery-selection "$BACKEND_SELECTION" \
-  -state-dir "$STATE_DIR" -data-dir "$DATA_DIR" \
-  -image "$CANONICAL_IMAGE" -public-dns "$PUBLIC_DNS_PRIMARY"
+sudo -u mcp-runner /usr/local/lib/mcp-workspaced/recover backend "$BACKEND_SELECTION"
 ```
 
 The selection binds the displayed ID, W+G, kind and BootID. A stale or mismatched
@@ -87,9 +84,7 @@ After backend/storage recovery, explicit exact cleanup is available using
 `generations[].selection`:
 
 ```sh
-mcp-workspaced -recover cleanup -recovery-selection "$GENERATION_SELECTION" \
-  -state-dir "$STATE_DIR" -data-dir "$DATA_DIR" \
-  -image "$CANONICAL_IMAGE" -public-dns "$PUBLIC_DNS_PRIMARY"
+sudo -u mcp-runner /usr/local/lib/mcp-workspaced/recover cleanup "$GENERATION_SELECTION"
 ```
 
 Cleanup uses the normal exact destroy path, refuses pending backend work, and
@@ -103,9 +98,9 @@ evidence and may require another explicit inspection.
 
 Free bytes/inodes returning, inspection and ordinary daemon restart do not clear
 a persisted storage latch. After restoring capacity through separately authorized
-operator action, invoke `-recover storage` with the same configuration and safety
-thresholds as the daemon. It samples current normal-user available bytes and free
-inodes and requires both `MinAvailableBytes` and `MinFreeInodes` before durably
+operator action, invoke `sudo -u mcp-runner /usr/local/lib/mcp-workspaced/recover storage`
+for the S3 deployment, preserving the daemon configuration and safety thresholds.
+It samples current normal-user available bytes and free inodes and requires both `MinAvailableBytes` and `MinFreeInodes` before durably
 clearing the latch. Unsafe, failed or canceled samples leave it set. Failed commit
 closes admission. This action deletes no files and never lowers thresholds.
 Backend recovery and storage recovery remain distinct actions and evidence checks.
