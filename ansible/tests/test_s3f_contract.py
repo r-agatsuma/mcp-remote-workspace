@@ -24,6 +24,52 @@ def tasks(role):
     return yaml.safe_load((ROOT / f'roles/{role}/tasks/main.yml').read_text())
 
 
+def reachable_tasks(path):
+    """Walk static task edges and blocks; refuse edges we cannot inspect."""
+    seen, active = set(), set()
+
+    def walk_file(path):
+        path = path.resolve()
+        if path in active:
+            raise AssertionError(f'cyclic task import: {path}')
+        if path in seen:
+            return
+        active.add(path)
+        yield from walk_tasks(path, yaml.safe_load(path.read_text()))
+        active.remove(path)
+        seen.add(path)
+
+    def walk_tasks(path, entries):
+        if not isinstance(entries, list):
+            raise AssertionError(f'expected task list: {path}')
+        for task in entries:
+            if not isinstance(task, dict):
+                raise AssertionError(f'expected task mapping: {path}')
+            yield path, task
+            for key, value in task.items():
+                action = key.rsplit('.', 1)[-1]
+                if action in ('include_role', 'import_role', 'include', 'action', 'local_action'):
+                    raise AssertionError(f'uninspectable task/role edge: {path}: {key}')
+                if action in ('import_tasks', 'include_tasks'):
+                    target = value.get('file') if isinstance(value, dict) else value
+                    if (not isinstance(target, str) or not target
+                            or any(token in target for token in ('{{', '{%', '{#'))):
+                        raise AssertionError(f'dynamic task edge: {path}: {value}')
+                    yield from walk_file(path.parent / target)
+                if key in ('block', 'rescue', 'always'):
+                    yield from walk_tasks(path, value)
+
+    yield from walk_file(path)
+
+
+def assert_manager_ordering(test, unit, manager):
+    for relation in ('Requires', 'After'):
+        entries = [line.split('=', 1)[1].split() for line in unit.splitlines()
+                   if line.startswith(relation + '=')]
+        test.assertEqual(len(entries), 1, relation)
+        test.assertIn(manager, entries[0], relation)
+
+
 def fact_task(role, key):
     return next(t for t in tasks(role) if key in t.get('ansible.builtin.set_fact', {}))
 
@@ -140,6 +186,17 @@ class Composition(unittest.TestCase):
                 for line in runtime.items():
                     self.assertIn('Environment="' + '='.join(line) + '"', unit)
                 self.assertIn(f'BindsTo=srv-mcp\\x2dpodman.mount mcp-data-ready.service user@{uid}.service netfilter-persistent.service', unit)
+                assert_manager_ordering(self, unit, facts['mcp_user_manager_unit'])
+                # Each relationship must independently detect removal or drift
+                # in the actual rendered unit, using the S3C-derived fact.
+                for relation in ('Requires', 'After'):
+                    for replacement in ('', 'user@1.service'):
+                        altered = '\n'.join(
+                            line.replace(facts['mcp_user_manager_unit'], replacement)
+                            if line.startswith(relation + '=') else line
+                            for line in unit.splitlines())
+                        with self.assertRaises(AssertionError):
+                            assert_manager_ordering(self, altered, facts['mcp_user_manager_unit'])
                 self.assertEqual(facts['mcp_user_manager_cgroup'], f'/user.slice/user-{uid}.slice/user@{uid}.service')
                 self.assertIn('User=' + facts['mcp_runner_account'] + '\nGroup=mcp-runner', unit)
                 self.assertIn('User=' + facts['mcp_tunnel_account'] + '\nGroup=mcp-tunnel',
@@ -161,25 +218,10 @@ class SourceBoundary(unittest.TestCase):
     def test_only_landed_roles_and_no_hidden_bootstrap_import(self):
         site = yaml.safe_load((ROOT / 'site.yml').read_text())
         self.assertEqual(site[0]['roles'], ['s3a', 's3b', 's3c', 's3d', 's3e'])
-        # Traverse all static task imports, refusing dynamic/unknown role edges.
-        seen = set()
-        def visit(path):
-            path = path.resolve()
-            if path in seen:
-                return
-            seen.add(path)
-            source = path.read_text()
-            for forbidden in ('mcp_data_bootstrap', 'data_bootstrap', 'bootstrap-data', 'mkfs', 'parted', 'wipefs --all'):
-                self.assertNotIn(forbidden, source, str(path))
-            for task in yaml.safe_load(source):
-                for key in ('ansible.builtin.import_tasks', 'ansible.builtin.include_tasks'):
-                    if key in task:
-                        self.assertNotIn('{{', task[key])
-                        visit(path.parent / task[key])
-                self.assertNotIn('ansible.builtin.include_role', task)
-                self.assertNotIn('ansible.builtin.import_role', task)
         for role in site[0]['roles']:
-            visit(ROOT / f'roles/{role}/tasks/main.yml')
+            for path, task in reachable_tasks(ROOT / f'roles/{role}/tasks/main.yml'):
+                for forbidden in ('mcp_data_bootstrap', 'data_bootstrap', 'bootstrap-data', 'mkfs', 'parted', 'wipefs --all'):
+                    self.assertNotIn(forbidden, yaml.safe_dump(task), str(path))
         bootstrap = tasks('data_bootstrap')
         self.assertIn('mcp_data_bootstrap_enabled | default(false) is sameas true',
                       bootstrap[0]['ansible.builtin.assert']['that'])
@@ -218,7 +260,7 @@ class SourceBoundary(unittest.TestCase):
     def test_single_authority_tasks_and_credential_file_reference(self):
         services = []
         for role in ('s3a', 's3b', 's3c', 's3d', 's3e'):
-            for task in tasks(role):
+            for path, task in reachable_tasks(ROOT / f'roles/{role}/tasks/main.yml'):
                 service = task.get('ansible.builtin.systemd_service', {})
                 if 'name' in service:
                     services.append((role, service['name']))
@@ -246,3 +288,45 @@ class SourceBoundary(unittest.TestCase):
                     key_lines.append(line.strip())
                 self.assertNotRegex(line, r'(?i)(?:OPENAI_API_KEY|CONTROL_PLANE_API_KEY)\s*[=:]')
         self.assertEqual(key_lines, ['api_key: file:/etc/mcp-tunnel/control-plane-api-key'])
+
+
+class TraversalRegression(unittest.TestCase):
+    def test_imported_authority_regressions_are_rejected(self):
+        # Mutate a disposable source copy, never the production checkout/host.
+        with tempfile.TemporaryDirectory(prefix='s3f-authority-') as tmp:
+            root = Path(tmp) / 'ansible'
+            shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns('__pycache__'))
+            imported = root / 'roles/s3c/tasks/interface.yml'
+            original = imported.read_text()
+            cases = [
+                {'ansible.builtin.systemd_service': {'name': 'nftables.service', 'state': 'started'}},
+                {'ansible.builtin.copy': {'dest': '/etc/resolv.conf', 'content': 'second authority'}},
+                {'ansible.builtin.copy': {'dest': '/etc/iptables/rules.v4', 'content': 'second authority'}},
+                {'ansible.builtin.copy': {'dest': '/sys/fs/cgroup/second/cgroup.subtree_control', 'content': '+cpu'}},
+            ]
+            for task in cases:
+                with self.subTest(task=task), patch(__name__ + '.ROOT', root):
+                    imported.write_text(original + yaml.safe_dump([{'block': [task]}]))
+                    with self.assertRaises(AssertionError):
+                        SourceBoundary().test_single_authority_tasks_and_credential_file_reference()
+
+    def test_static_includes_blocks_and_uninspectable_edges(self):
+        with tempfile.TemporaryDirectory(prefix='s3f-edges-') as tmp:
+            root = Path(tmp)
+            main = root / 'main.yml'
+            (root / 'child.yml').write_text('- name: reached\n  ansible.builtin.debug: {msg: synthetic}\n')
+            for edge in ('ansible.builtin.import_tasks', 'include_tasks'):
+                for branch in ('block', 'rescue', 'always'):
+                    main.write_text(yaml.safe_dump([{branch: [{edge: {'file': 'child.yml'}}]}]))
+                    self.assertTrue(any(task.get('name') == 'reached' for _, task in reachable_tasks(main)))
+            for task in [
+                {'include_tasks': '{{ selected }}.yml'},
+                {'ansible.builtin.import_tasks': {'file': '{% if selection %}child.yml{% endif %}'}},
+                {'ansible.builtin.include_role': {'name': '{{ role }}'}},
+                {'import_role': {'name': 'uninspected'}},
+                {'action': 'include_tasks child.yml'},
+            ]:
+                with self.subTest(task=task):
+                    main.write_text(yaml.safe_dump([{'block': [task]}]))
+                    with self.assertRaises(AssertionError):
+                        list(reachable_tasks(main))

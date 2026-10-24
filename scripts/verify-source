@@ -27,6 +27,38 @@ def unavailable(reason):
     print('UNSUPPORTED / NOT EXECUTED: ' + reason, flush=True)
 
 
+def verify_deployment_source():
+    try:
+        import yaml
+    except ImportError as exc:
+        unavailable('PyYAML repository parsing: ' + str(exc))
+    else:
+        for path in sorted(ROOT.rglob('*.yml')) + sorted(ROOT.rglob('*.yaml')):
+            list(yaml.safe_load_all(path.read_text()))
+        print('PASS: repository YAML parsing', flush=True)
+    try:
+        import ansible  # Existing deployment dependency, never auto-installed.
+        import yaml  # The component tests also require PyYAML.
+    except ImportError as exc:
+        unavailable('Ansible syntax/render/component checks: ' + str(exc))
+    else:
+        if not shutil.which('ansible-playbook'):
+            unavailable('ansible-playbook syntax and render checks')
+        else:
+            for play in ['site.yml', 'bootstrap-data.yml', 'tests/revision_contract.yml']:
+                run(['ansible-playbook', '-i', 'localhost,', '--syntax-check', play], ROOT / 'ansible')
+            run(['ansible-playbook', '-i', 'localhost,', '--list-tasks', 'site.yml'], ROOT / 'ansible')
+            run(['ansible-inventory', '-i', 'inventory/hosts.example.yml', '--list'], ROOT / 'ansible')
+            run(['ansible-playbook', '-i', 'localhost,', 'tests/revision_contract.yml'], ROOT / 'ansible')
+            sys.path.insert(0, str(ROOT / 'ansible/tests'))
+            suite = unittest.defaultTestLoader.discover(str(ROOT / 'ansible/tests'), 'test_*.py')
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
+            for test, reason in result.skipped:
+                unavailable(str(test) + ': ' + reason)
+            if not result.wasSuccessful():
+                raise RuntimeError('source/component tests failed')
+
+
 def main():
     run(['go', 'mod', 'verify'])
     files = subprocess.check_output(['git', 'ls-files', '*.go'], text=True).splitlines()
@@ -56,30 +88,7 @@ def main():
             run(['readelf', '-l', '-d', binary])
         else:
             unavailable('readelf artifact linkage inspection')
-    try:
-        import yaml
-        import ansible  # Existing deployment dependencies, never auto-installed.
-    except ImportError as exc:
-        unavailable('Ansible/PyYAML source checks: ' + str(exc))
-    else:
-        for path in sorted(ROOT.rglob('*.yml')) + sorted(ROOT.rglob('*.yaml')):
-            list(yaml.safe_load_all(path.read_text()))
-        print('PASS: repository YAML parsing', flush=True)
-        if not shutil.which('ansible-playbook'):
-            unavailable('ansible-playbook syntax and render checks')
-        else:
-            for play in ['site.yml', 'bootstrap-data.yml', 'tests/revision_contract.yml']:
-                run(['ansible-playbook', '-i', 'localhost,', '--syntax-check', play], ROOT / 'ansible')
-            run(['ansible-playbook', '-i', 'localhost,', '--list-tasks', 'site.yml'], ROOT / 'ansible')
-            run(['ansible-inventory', '-i', 'inventory/hosts.example.yml', '--list'], ROOT / 'ansible')
-            run(['ansible-playbook', '-i', 'localhost,', 'tests/revision_contract.yml'], ROOT / 'ansible')
-            sys.path.insert(0, str(ROOT / 'ansible/tests'))
-            suite = unittest.defaultTestLoader.discover(str(ROOT / 'ansible/tests'), 'test_*.py')
-            result = unittest.TextTestRunner(verbosity=2).run(suite)
-            for test, reason in result.skipped:
-                unavailable(str(test) + ': ' + reason)
-            if not result.wasSuccessful():
-                raise RuntimeError('source/component tests failed')
+    verify_deployment_source()
     run(['git', 'diff', '--check'])
     run(['git', 'diff', '--cached', '--check'])
     print('Source checks completed' + (' WITH UNSUPPORTED CHECKS' if unsupported else ': PASS'))
