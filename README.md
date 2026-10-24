@@ -44,6 +44,9 @@ same service-controlled image/runtime controls. See the
 Host-fetch resolver configuration and root-managed OUTPUT policy remain deployment
 responsibilities; actual network/DNS effectiveness is deferred to #95.
 
+For deployment and service operation, use the [S3 operator runbook](docs/operations.md).
+The complete local source/static check is `./scripts/verify-source`.
+
 ## Go baseline
 
 `go.mod` records Go language/module minimum **1.26.8** (required by the pinned Dockerfile parser)
