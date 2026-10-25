@@ -125,7 +125,7 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 		"--label", generationLabel + "=" + string(e.Generation),
 		"--label", imageLabel + "=" + testImage,
 		"--label", ownerLabel + "=" + ownerValue,
-		"--label", workspaceLabel + "=" + string(e.Workspace), "--", testImage}
+		"--label", workspaceLabel + "=" + string(e.Workspace)}
 	for _, mode := range []string{"success", "other-canonical", "built-image", "custom-policy", "create-error", "invalid-create-id", "mismatched-created-object", "mismatched-created-image", "start-error"} {
 		t.Run(mode, func(t *testing.T) {
 			args := append([]string(nil), create...)
@@ -140,7 +140,9 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 				args[i] = strings.ReplaceAll(args[i], testImage, image)
 			}
 			if mode != "built-image" {
-				args = append(args, "/usr/bin/sleep", "infinity")
+				args = append(args, "--entrypoint=/usr/bin/sleep", "--", image, "infinity")
+			} else {
+				args = append(args, "--", image)
 			}
 			policy := ReferencePolicy()
 			if mode == "custom-policy" {
@@ -236,9 +238,19 @@ func TestPodmanCanonicalKeepaliveCannotBeChangedByCaller(t *testing.T) {
 			if err := p.Create(context.Background(), e, testImage); err != nil {
 				t.Fatal(err)
 			}
+			entrypoints := 0
 			for i, arg := range cli.create {
+				if strings.HasPrefix(arg, "--entrypoint") {
+					entrypoints++
+					if arg != "--entrypoint=/usr/bin/sleep" {
+						t.Fatal("caller changed canonical entrypoint", arg)
+					}
+				}
 				if arg == "--" {
-					if !reflect.DeepEqual(cli.create[i:], []string{"--", testImage, "/usr/bin/sleep", "infinity"}) {
+					if entrypoints != 1 {
+						t.Fatal("canonical create must have exactly one fixed entrypoint", cli.create[:i])
+					}
+					if !reflect.DeepEqual(cli.create[i:], []string{"--", testImage, "infinity"}) {
 						t.Fatal("caller changed canonical image or keepalive argv", cli.create[i:])
 					}
 					return
@@ -251,7 +263,7 @@ func TestPodmanCanonicalKeepaliveCannotBeChangedByCaller(t *testing.T) {
 
 func TestPodmanCreateRejectsInvalidImageAuthority(t *testing.T) {
 	e := Exact{identity(t, "s", "c").Workspace(), Generation(strings.Repeat("b", 64))}
-	for _, image := range []string{"", "ubuntu:latest", "--entrypoint=/bin/sh", testImage + " /bin/sh", testImage + "\n/usr/bin/sleep 1",
+	for _, image := range []string{"", "ubuntu:latest", "--entrypoint=/bin/sh", testImage + " /bin/sh", testImage + " --entrypoint=/bin/true", testImage + "\n/usr/bin/sleep 1",
 		"other@sha256:" + strings.Repeat("c", 64), "sha256:short", "@sha256:" + strings.Repeat("c", 64)} {
 		t.Run(image, func(t *testing.T) {
 			p, _ := podmanStub(t, infoStep())
