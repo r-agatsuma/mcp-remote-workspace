@@ -142,9 +142,18 @@ func TestTrustedProfileOpenBuildAndFinalParity(t *testing.T) {
 					}
 				}
 			}
-			// Compare the complete effective argv, ignoring only exact image/labels
-			// and the per-service configuration location.
+			// Compare all runtime controls, allowing only the canonical keepalive,
+			// exact image/labels and per-service configuration location to differ.
 			normalized := slices.Clone(args)
+			boundary := slices.Index(normalized, "--")
+			wantTail := []string{"--", image}
+			if !custom {
+				wantTail = append(wantTail, "/usr/bin/sleep", "infinity")
+			}
+			if boundary < 0 || !slices.Equal(normalized[boundary:], wantTail) {
+				t.Fatal("unexpected image command behavior", normalized)
+			}
+			normalized = normalized[:boundary+2]
 			for i, a := range normalized {
 				normalized[i] = strings.ReplaceAll(strings.ReplaceAll(a, p.profileDir, "PROFILE"), image, "IMAGE")
 			}

@@ -281,6 +281,11 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) (err error) 
 		args = append(args, "--label", key+"="+labels[key])
 	}
 	args = append(args, "--", image)
+	if image == p.image {
+		// Keep canonical userspace alive without a shell or caller-selected argv.
+		// Dockerfile-built immutable images retain their own command behavior.
+		args = append(args, "/usr/bin/sleep", "infinity")
+	}
 	data, err := p.runner.run(ctx, args...)
 	if err != nil {
 		return err
