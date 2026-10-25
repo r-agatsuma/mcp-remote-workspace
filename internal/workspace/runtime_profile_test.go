@@ -142,9 +142,36 @@ func TestTrustedProfileOpenBuildAndFinalParity(t *testing.T) {
 					}
 				}
 			}
-			// Compare the complete effective argv, ignoring only exact image/labels
-			// and the per-service configuration location.
+			// Compare all runtime controls, allowing only the canonical keepalive,
+			// exact image/labels and per-service configuration location to differ.
 			normalized := slices.Clone(args)
+			boundary := slices.Index(normalized, "--")
+			wantTail := []string{"--", image}
+			if !custom {
+				wantTail = append(wantTail, "infinity")
+			}
+			if boundary < 0 || !slices.Equal(normalized[boundary:], wantTail) {
+				t.Fatal("unexpected image command behavior", normalized)
+			}
+			normalized = normalized[:boundary+2]
+			var entrypoints []string
+			entrypointIndex := -1
+			for i, arg := range normalized[:boundary] {
+				if strings.HasPrefix(arg, "--entrypoint") {
+					entrypoints = append(entrypoints, arg)
+					entrypointIndex = i
+				}
+			}
+			if custom {
+				if len(entrypoints) != 0 {
+					t.Fatal("built image ENTRYPOINT overridden", entrypoints)
+				}
+			} else {
+				if !slices.Equal(entrypoints, []string{"--entrypoint=/usr/bin/sleep"}) {
+					t.Fatal("canonical ENTRYPOINT not fixed exactly once", entrypoints)
+				}
+				normalized = slices.Delete(normalized, entrypointIndex, entrypointIndex+1)
+			}
 			for i, a := range normalized {
 				normalized[i] = strings.ReplaceAll(strings.ReplaceAll(a, p.profileDir, "PROFILE"), image, "IMAGE")
 			}

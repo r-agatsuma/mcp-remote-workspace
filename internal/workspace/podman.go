@@ -280,7 +280,14 @@ func (p *Podman) Create(ctx context.Context, e Exact, image string) (err error) 
 	for _, key := range keys {
 		args = append(args, "--label", key+"="+labels[key])
 	}
-	args = append(args, "--", image)
+	if image == p.image {
+		// Own both ENTRYPOINT and CMD so image metadata cannot replace the
+		// fixed canonical keepalive. No shell or caller-selected argv is used.
+		args = append(args, "--entrypoint=/usr/bin/sleep", "--", image, "infinity")
+	} else {
+		// Dockerfile-built immutable images retain their ENTRYPOINT/CMD.
+		args = append(args, "--", image)
+	}
 	data, err := p.runner.run(ctx, args...)
 	if err != nil {
 		return err

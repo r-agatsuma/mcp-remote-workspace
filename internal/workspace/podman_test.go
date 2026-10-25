@@ -125,10 +125,25 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 		"--label", generationLabel + "=" + string(e.Generation),
 		"--label", imageLabel + "=" + testImage,
 		"--label", ownerLabel + "=" + ownerValue,
-		"--label", workspaceLabel + "=" + string(e.Workspace), "--", testImage}
-	for _, mode := range []string{"success", "custom-policy", "create-error", "invalid-create-id", "mismatched-created-object", "start-error"} {
+		"--label", workspaceLabel + "=" + string(e.Workspace)}
+	for _, mode := range []string{"success", "other-canonical", "built-image", "custom-policy", "create-error", "invalid-create-id", "mismatched-created-object", "mismatched-created-image", "start-error"} {
 		t.Run(mode, func(t *testing.T) {
 			args := append([]string(nil), create...)
+			image := testImage
+			switch mode {
+			case "other-canonical":
+				image = "registry.example/team/canonical@sha256:" + strings.Repeat("f", 64)
+			case "built-image":
+				image = "sha256:" + strings.Repeat("e", 64)
+			}
+			for i := range args {
+				args[i] = strings.ReplaceAll(args[i], testImage, image)
+			}
+			if mode != "built-image" {
+				args = append(args, "--entrypoint=/usr/bin/sleep", "--", image, "infinity")
+			} else {
+				args = append(args, "--", image)
+			}
 			policy := ReferencePolicy()
 			if mode == "custom-policy" {
 				policy.MemoryBytes = 2 << 30
@@ -163,11 +178,17 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 				steps[1].output = "unknown"
 			default:
 				inspected := fakeObject(e)
+				inspected.Image = image
+				inspected.Labels[imageLabel] = image
 				if mode == "mismatched-created-object" {
 					inspected.Labels[generationLabel] = strings.Repeat("d", 64)
 				}
+				if mode == "mismatched-created-image" {
+					inspected.Image = "other@sha256:" + strings.Repeat("c", 64)
+					inspected.Labels[imageLabel] = inspected.Image
+				}
 				steps = append(steps, inspectStep(t, inspected))
-				if mode != "mismatched-created-object" {
+				if mode != "mismatched-created-object" && mode != "mismatched-created-image" {
 					start := commandStep{args: []string{"container", "start", "--", o.ID}, output: o.ID}
 					if mode == "start-error" {
 						start.err = injected
@@ -175,7 +196,16 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 					steps = append(steps, start)
 				}
 			}
+			if mode == "built-image" {
+				// The existing immutable-image authority check must precede create.
+				inspection := commandStep{args: []string{"image", "inspect", "--", image},
+					output: jsonText(t, []any{map[string]any{"Id": image, "Config": map[string]any{"Labels": objectLabels(e, buildImageName(e))}}})}
+				steps = append(steps[:1], append([]commandStep{inspection}, steps[1:]...)...)
+			}
 			p, _ := podmanStub(t, steps...)
+			if mode == "other-canonical" {
+				p.image = image
+			}
 			for i := range args {
 				args[i] = strings.ReplaceAll(args[i], "PROFILE", p.profileDir)
 			}
@@ -183,14 +213,76 @@ func TestPodmanCreateUsesCanonicalExactObject(t *testing.T) {
 			if err := p.Initialize(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			err := p.Create(context.Background(), e, testImage)
-			if (mode == "success" || mode == "custom-policy") && err != nil {
+			err := p.Create(context.Background(), e, image)
+			wantSuccess := mode == "success" || mode == "custom-policy" || mode == "other-canonical" || mode == "built-image"
+			if wantSuccess && err != nil {
 				t.Fatal(err)
 			}
-			if mode != "success" && mode != "custom-policy" && err == nil {
+			if !wantSuccess && err == nil {
 				t.Fatal("partial/unrecognized create succeeded")
 			}
 		})
+	}
+}
+
+func TestPodmanCanonicalKeepaliveCannotBeChangedByCaller(t *testing.T) {
+	for _, input := range []string{"ordinary", "--entrypoint=/bin/sh", "; exec /bin/sh -c 'exit'", "$(touch /tmp/caller)\ninfinity"} {
+		t.Run(input, func(t *testing.T) {
+			e := Exact{identity(t, input, input).Workspace(), Generation(strings.Repeat("b", 64))}
+			cli := &profileCLI{t: t, e: e, image: testImage}
+			p, _ := podmanStub(t)
+			p.runner = cli
+			if err := p.Initialize(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Create(context.Background(), e, testImage); err != nil {
+				t.Fatal(err)
+			}
+			entrypoints := 0
+			for i, arg := range cli.create {
+				if strings.HasPrefix(arg, "--entrypoint") {
+					entrypoints++
+					if arg != "--entrypoint=/usr/bin/sleep" {
+						t.Fatal("caller changed canonical entrypoint", arg)
+					}
+				}
+				if arg == "--" {
+					if entrypoints != 1 {
+						t.Fatal("canonical create must have exactly one fixed entrypoint", cli.create[:i])
+					}
+					if !reflect.DeepEqual(cli.create[i:], []string{"--", testImage, "infinity"}) {
+						t.Fatal("caller changed canonical image or keepalive argv", cli.create[i:])
+					}
+					return
+				}
+			}
+			t.Fatal("missing image/command boundary")
+		})
+	}
+}
+
+func TestPodmanCreateRejectsInvalidImageAuthority(t *testing.T) {
+	e := Exact{identity(t, "s", "c").Workspace(), Generation(strings.Repeat("b", 64))}
+	for _, image := range []string{"", "ubuntu:latest", "--entrypoint=/bin/sh", testImage + " /bin/sh", testImage + " --entrypoint=/bin/true", testImage + "\n/usr/bin/sleep 1",
+		"other@sha256:" + strings.Repeat("c", 64), "sha256:short", "@sha256:" + strings.Repeat("c", 64)} {
+		t.Run(image, func(t *testing.T) {
+			p, _ := podmanStub(t, infoStep())
+			if err := p.Initialize(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Create(context.Background(), e, image); err == nil {
+				t.Fatal("invalid image authority accepted")
+			}
+		})
+	}
+	image := "sha256:" + strings.Repeat("e", 64)
+	p, _ := podmanStub(t, infoStep(), commandStep{args: []string{"image", "inspect", "--", image},
+		output: jsonText(t, []any{map[string]any{"Id": image, "Config": map[string]any{"Labels": objectLabels(e, testImage)}}})})
+	if err := p.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Create(context.Background(), e, image); err == nil {
+		t.Fatal("immutable image without exact build ownership accepted")
 	}
 }
 
