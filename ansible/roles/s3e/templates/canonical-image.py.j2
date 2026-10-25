@@ -77,6 +77,12 @@ def verify_credential_helpers():
             config = tomllib.loads(path.read_text())
         except FileNotFoundError:
             continue
+        # containers/image's Go TOML decoder matches struct keys without case.
+        # Accept only the canonical spelling, never choose between equivalent
+        # definitions (even if their values happen to agree).
+        helper_keys = [key for key in config if key.casefold() == 'credential-helpers']
+        if helper_keys not in ([], ['credential-helpers']):
+            raise ValueError('ambiguous or noncanonical registry credential-helper key')
         if config.get('credential-helpers', []) not in ([], ['containers-auth.json']):
             raise ValueError('ambient registry credential helper; separate Human decision required')
 

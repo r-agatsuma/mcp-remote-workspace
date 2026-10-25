@@ -289,6 +289,59 @@ class RenderedContract(unittest.TestCase):
                 helper.converge()
             self.assertFalse(any('pull' in c for c in calls))
 
+    def test_canonical_effective_credential_helper_keys_gate_acquisition(self):
+        # Exercise the rendered production converge() path, including its actual
+        # TOML gate. Only host observations and Podman processes are doubled.
+        config_paths = ['/etc/containers/registries.conf',
+                        '/srv/mcp-podman/runner/.config/containers/registries.conf',
+                        '/etc/containers/registries.conf.d/custom.conf',
+                        '/srv/mcp-podman/runner/.config/containers/registries.conf.d/custom.conf']
+        cases = [('', False), ('credential-helpers = []', False),
+                 ('credential-helpers = ["containers-auth.json"]', False)]
+        for key in ['credential-helpers', 'Credential-Helpers', 'CREDENTIAL-HELPERS',
+                    'CrEdEnTiAl-HeLpErS', '"credential-helper\u017f"']:
+            for value in ['["secretservice"]', '["pass"]', '["containers-auth.json", "pass"]',
+                          '["secretservice", "containers-auth.json"]', '"containers-auth.json"',
+                          'false', '[1]', '[[]]', '{ helper = "pass" }']:
+                cases.append((key + ' = ' + value, True))
+            if key != 'credential-helpers':
+                # Reject noncanonical spellings even with otherwise safe values;
+                # there must be no choice of precedence between equivalent keys.
+                cases.extend([(key + ' = []', True), (key + ' = ["containers-auth.json"]', True)])
+        cases.extend([
+            ('credential-helpers = []\nCredential-Helpers = ["secretservice"]', True),
+            ('Credential-Helpers = ["secretservice"]\ncredential-helpers = []', True),
+            ('credential-helpers = []\nCREDENTIAL-HELPERS = []', True),
+            ('credential-helpers = []\ncredential-helpers = []', True),
+            ('credential-helpers = [', True), ('Credential-Helpers = [', True),
+            ('[credential-helpers]\nhelper = "pass"', True),
+        ])
+        for uid in [947, 20481]:
+            helper = self.canonical(uid)
+            for target in config_paths:
+                for config, rejects in cases:
+                    with self.subTest(uid=uid, target=target, config=config), \
+                         tempfile.TemporaryDirectory() as directory:
+                        state, calls, reads = {'present': False}, [], []
+                        def read(path):
+                            self.assertIn(str(path), config_paths, 'must not read credential contents')
+                            reads.append(str(path))
+                            return config if str(path) == target else ''
+                        with self.canonical_context(helper, state, calls, directory), \
+                             patch.object(helper.Path, 'read_text', read), \
+                             patch.object(helper.Path, 'exists', return_value=True), \
+                             patch.object(helper.Path, 'glob', lambda p, pattern: [p / 'custom.conf']):
+                            if rejects:
+                                with self.assertRaises(ValueError):
+                                    helper.converge()
+                                self.assertFalse(any('pull' in c for c in calls))
+                                self.assertFalse(state['present'])
+                                self.assertEqual(list(Path(directory).iterdir()), [])
+                            else:
+                                self.assertTrue(helper.converge()['changed'])
+                                self.assertEqual(sum('pull' in c for c in calls), 1)
+                            self.assertIn(target, reads)
+
     def test_tunnel_config_and_fail_closed_start_sequence(self):
         for uid, port in [(947, 8080), (20481, 18080)]:
             output = self.directory / str(uid)
