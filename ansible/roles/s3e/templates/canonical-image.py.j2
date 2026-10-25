@@ -1,0 +1,123 @@
+#!/usr/bin/python3
+"""Deployment-only canonical image convergence; no runtime acquisition or cleanup."""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+ENVIRONMENT = {{ mcp_service_environment | to_json }}
+UID = {{ mcp_runner_uid }}
+GID = {{ mcp_runner_primary_gid }}
+IMAGE = {{ mcp_canonical_image | to_json }}
+GRAPHROOT = {{ mcp_runtime_graphroot | to_json }}
+PODMAN = ['/usr/bin/podman', '--remote=false']
+
+
+def run(command, *, check=True, timeout=30):
+    # Never inherit remote endpoints, auth, proxy or configuration overrides.
+    return subprocess.run(command, env=ENVIRONMENT, check=check, stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def repository_digest():
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}', IMAGE):
+        raise ValueError('canonical reference must be digest pinned')
+    name, digest = IMAGE.split('@')
+    registry, slash, repository = name.partition('/')
+    if (not slash or not repository or repository.startswith('/')
+            or not re.fullmatch(r'[a-z0-9][a-z0-9.-]*(?::[0-9]+)?', registry)
+            or not ('.' in registry or ':' in registry or registry == 'localhost')):
+        raise ValueError('ambiguous short name; configure an explicit registry and repository')
+    # RepoDigests does not include an optional tag, even for tag@digest input.
+    repository = repository.rsplit(':', 1)[0]
+    return registry + '/' + repository + '@' + digest
+
+
+def verify_store():
+    info = json.loads(run(PODMAN + ['info', '--format=json']).stdout)
+    store = info['store']
+    if (info['host']['security']['rootless'] is not True
+            or store['graphRoot'] != GRAPHROOT
+            or store['runRoot'] != ENVIRONMENT['XDG_RUNTIME_DIR'] + '/containers'
+            or store['configFile'] != ENVIRONMENT['XDG_CONFIG_HOME'] + '/containers/storage.conf'):
+        raise ValueError('wrong final rootless Podman store')
+
+
+def inspect(reference, expected):
+    images = json.loads(run(PODMAN + ['image', 'inspect', '--', reference]).stdout)
+    if not isinstance(images, list) or len(images) != 1 or not isinstance(images[0], dict):
+        raise ValueError('ambiguous image inspection')
+    image = images[0]
+    image_id = image.get('Id', '')
+    digest = image.get('Digest', '')
+    if (not isinstance(image_id, str) or not re.fullmatch(r'(sha256:)?[0-9a-f]{64}', image_id)
+            or not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+            or not isinstance(image.get('RepoDigests'), list) or expected not in image['RepoDigests']):
+        raise ValueError('image lacks exact immutable digest association')
+    # Digest may be a platform manifest while expected pins its multiarch index.
+    # Both must be associated with the same inspected immutable local ID.
+    return 'sha256:' + image_id.removeprefix('sha256:'), digest
+
+
+def verify_credential_helpers():
+    # Podman 4.9's explicit --authfile disables fallback auth files, but global
+    # registries.conf credential helpers are separate. Observe all possible
+    # default inputs conservatively; never read credential files or repair policy.
+    containers = Path(ENVIRONMENT['HOME']) / '.config/containers'
+    paths = [Path('/etc/containers/registries.conf'), containers / 'registries.conf']
+    for directory in [Path('/etc/containers/registries.conf.d'), containers / 'registries.conf.d']:
+        if directory.exists():
+            paths.extend(sorted(directory.glob('*.conf')))
+    for path in paths:
+        try:
+            config = tomllib.loads(path.read_text())
+        except FileNotFoundError:
+            continue
+        if config.get('credential-helpers', []) not in ([], ['containers-auth.json']):
+            raise ValueError('ambient registry credential helper; separate Human decision required')
+
+
+def converge():
+    if os.getuid() != UID or os.geteuid() != UID or os.getgid() != GID or UID == 0:
+        raise ValueError('wrong deployment identity')
+    if set(os.getgroups()) - {GID}:
+        raise ValueError('unexpected supplementary group')
+    expected = repository_digest()
+    # Reuse the landed read-only Data/manager/network/DNS gates before Podman.
+    run(['/usr/bin/python3', '-I', '/usr/local/lib/mcp-workspaced/service-prerequisites'])
+    verify_store()
+    exists = run(PODMAN + ['image', 'exists', '--', IMAGE], check=False).returncode
+    if exists not in (0, 1):
+        raise ValueError('local image state cannot be established')
+    if exists == 1:
+        verify_credential_helpers()
+        with tempfile.TemporaryDirectory(prefix='mcp-canonical-auth-', dir=ENVIRONMENT['TMPDIR']) as directory:
+            authfile = Path(directory) / 'auth.json'
+            authfile.write_text('{"auths":{}}')
+            authfile.chmod(0o600)
+            certs = Path(directory) / 'certs'
+            certs.mkdir(mode=0o700)
+            # Explicit empty authfile excludes runner/root/Docker login state;
+            # empty cert-dir also excludes ambient client certificate credentials.
+            # Keep host registry routing and S3D DNS/egress; no proxy or exception.
+            run(PODMAN + ['pull', '--authfile=' + str(authfile), '--cert-dir=' + str(certs),
+                          '--tls-verify=true', '--', IMAGE], timeout=1800)
+    image_id, digest = inspect(IMAGE, expected)
+    if inspect(image_id, expected) != (image_id, digest):
+        raise ValueError('immutable local image identity changed')
+    return {'changed': exists == 1, 'reference': IMAGE, 'image_id': image_id, 'digest': digest}
+
+
+if __name__ == '__main__':
+    try:
+        if len(sys.argv) != 1:
+            raise ValueError('no arguments accepted')
+        print(json.dumps(converge()))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        reason = str(exc) if type(exc) is ValueError else type(exc).__name__
+        sys.exit('STOP: canonical image convergence failed (' + reason
+                 + '); check final store, digest and anonymous registry access; no credential/network fallback')

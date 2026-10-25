@@ -508,8 +508,12 @@ S3E installs `mcp-workspaced.service` as `mcp-runner` and `mcp-tunnel.service`
 as `mcp-tunnel`. Set `mcp_canonical_image` to the canonical image's exact
 `@sha256:<64 lowercase hex>` reference and `mcp_tunnel_id` to the deployment's
 `tunnel_<32 lowercase hex>` ID. The checked-in placeholders deliberately fail.
-The image must already exist in the runner's local store; S3E does not pull it
-or create a Tunnel object. The non-secret `mcp_production_endpoint` mapping
+The operator selects the public canonical image and supplies its fully qualified
+registry/repository digest reference (include `library/` for Docker Hub official
+images). S3E converges that exact image into the final runner store before
+starting/restarting production services; manual image pre-installation is no
+longer a deployment prerequisite. S3E does not create a Tunnel object.
+The non-secret `mcp_production_endpoint` mapping
 supplies S3D's exact reply rule, the daemon listener and the Tunnel `main`
 channel. No second production endpoint default exists.
 
@@ -522,6 +526,47 @@ launcher render that vector; neither maintains a second flag/value list.
 The same S3B/S3C environment supplies HOME, XDG placement, TMPDIR, PATH and the
 actual-UID runtime/bus address. Unsupported/missing fields, unpinned images,
 alternate paths and invalid policy fail before service installation.
+
+Canonical-image convergence runs the root-owned `canonical-image` deployment
+helper as `mcp-runner`, with inherited environment removed. Its subprocesses
+use exactly `mcp_service_environment`: the final Data HOME/XDG configuration,
+TMPDIR and S3C runtime/bus. It first executes the existing read-only service
+prerequisites (Data, user manager and S3D network/DNS), then checks Podman
+`info --format=json` for rootless mode, final GraphRoot, RunRoot and the final
+`storage.conf`. A root/ambient store cannot satisfy the prerequisite.
+
+`podman --remote=false image exists -- <configured-reference>` distinguishes
+present (0), absent (1) and errors (any other status). Present state performs
+only local verification and reports `changed: false`. Absent state pulls just
+that exact reference, verifies it, then reports `changed: true`; subsequent
+convergence does not pull. Inspect must return exactly one image with a full
+immutable local ID, a SHA-256 manifest digest and the configured repository/digest
+in `RepoDigests` (an optional tag is omitted from this comparison). The helper
+then inspects the immutable ID and requires the same ID, digest and repository
+association. A multiarch index in `RepoDigests` may differ from the platform
+manifest `Digest`; neither is compared to the config/image ID as if they were
+the same kind of hash. Malformed/ambiguous/mismatched inspection stops deployment.
+
+Acquisition uses a private temporary directory on Data containing only a fresh
+0600 `auth.json` with `{"auths":{}}` and an empty client certificate directory.
+Explicit `--authfile` prevents fallback to Podman/Docker login files;
+`--cert-dir` excludes ambient client certificate credentials and
+`--tls-verify=true` retains certificate verification. Because global registry
+credential helpers are separate from authfile lookup, the helper conservatively
+parses default system/runner `registries.conf` and their immediate `.conf`
+drop-ins and rejects helpers other than the built-in `containers-auth.json`.
+Missing files are allowed; unreadable/malformed configuration stops. It never
+reads authentication material. Registry routing stays unchanged, and acquisition
+uses the existing host resolver and runner UID's S3D egress policy, without
+proxy environment, DNS/firewall exceptions or short-name substitution. A registry
+requiring credentials or network-policy changes requires a separate Human
+decision. The temporary auth context is removed; no image/layer/cache cleanup
+is performed, including when policy changes from image A to B.
+
+The daemon still requires the canonical image to be present at execution time
+and creates canonical containers with `--pull=never`. This deployment helper is
+not a daemon/runtime fallback. Dockerfile-backed external-image acquisition,
+build ownership and build `--pull=never` remain unchanged.
 
 The daemon runs `/usr/local/bin/mcp-workspaced -daemon -mcp-listen ...` in
 `system.slice`, outside finite build parents. It requires and binds its lifetime

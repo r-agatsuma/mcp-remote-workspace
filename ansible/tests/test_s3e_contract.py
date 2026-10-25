@@ -14,6 +14,7 @@ import types
 import unittest
 from unittest.mock import Mock, patch
 import zipfile
+from contextlib import ExitStack
 
 import yaml
 
@@ -112,6 +113,181 @@ class RenderedContract(unittest.TestCase):
             self.assertIn('StandardOutput=null\nStandardError=null', unit)
             self.assertIn('StartLimitBurst=3', unit)
             self.assertIn('TimeoutStopSec=15s', unit)
+
+    def canonical(self, uid=947):
+        return module(self.directory / str(uid) / 'canonical-image.py')
+
+    def canonical_execution(self, helper, state, calls):
+        """Podman process double only; all convergence decisions use rendered source."""
+        def execute(command, **kwargs):
+            calls.append(command)
+            self.assertEqual(kwargs['env'], helper.ENVIRONMENT)
+            self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+            if command == ['/usr/bin/python3', '-I', '/usr/local/lib/mcp-workspaced/service-prerequisites']:
+                if state.get('prerequisite_failed'):
+                    raise subprocess.CalledProcessError(1, command)
+                return types.SimpleNamespace(stdout='', returncode=0)
+            self.assertEqual(command[:2], ['/usr/bin/podman', '--remote=false'])
+            args = command[2:]
+            if args == ['info', '--format=json']:
+                info = {'host': {'security': {'rootless': True}}, 'store': {
+                    'graphRoot': '/srv/mcp-podman/runner/.local/share/containers/storage',
+                    'runRoot': helper.ENVIRONMENT['XDG_RUNTIME_DIR'] + '/containers',
+                    'configFile': '/srv/mcp-podman/runner/.config/containers/storage.conf'}}
+                info['store'].update(state.get('store', {}))
+                if state.get('rootful'):
+                    info['host']['security']['rootless'] = False
+                return types.SimpleNamespace(stdout=json.dumps(info), returncode=0)
+            if args == ['image', 'exists', '--', helper.IMAGE]:
+                return types.SimpleNamespace(stdout='', returncode=state.get('exists_rc', 0 if state['present'] else 1))
+            if args[0] == 'pull':
+                self.assertEqual(args[-2:], ['--', helper.IMAGE])
+                self.assertEqual(len(args), 6)
+                authfile = Path(args[1].removeprefix('--authfile='))
+                certs = Path(args[2].removeprefix('--cert-dir='))
+                with authfile.open() as stream:
+                    self.assertEqual(json.load(stream), {'auths': {}})
+                self.assertEqual(stat.S_IMODE(authfile.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(authfile.parent.stat().st_mode), 0o700)
+                self.assertEqual(certs.parent, authfile.parent)
+                self.assertEqual(list(certs.iterdir()), [])
+                self.assertEqual(stat.S_IMODE(certs.stat().st_mode), 0o700)
+                self.assertEqual(args[3], '--tls-verify=true')
+                self.assertEqual(kwargs['timeout'], 1800)
+                if state.get('pull_failed'):
+                    raise subprocess.CalledProcessError(1, command)
+                state['present'] = True
+                return types.SimpleNamespace(stdout='b' * 64, returncode=0)
+            self.assertEqual(args[:3], ['image', 'inspect', '--'])
+            self.assertIn(args[3], [helper.IMAGE, 'sha256:' + 'b' * 64])
+            if state.get('inspect_failed'):
+                raise subprocess.CalledProcessError(125, command)
+            if 'inspection_raw' in state:
+                return types.SimpleNamespace(stdout=state['inspection_raw'], returncode=0)
+            record = {'Id': 'b' * 64, 'Digest': 'sha256:' + 'a' * 64, 'RepoDigests': [helper.IMAGE]}
+            record.update(state.get('inspection', {}))
+            if args[3].startswith('sha256:'):
+                record.update(state.get('by_id', {}))
+            return types.SimpleNamespace(stdout=json.dumps([record]), returncode=0)
+        return execute
+
+    def canonical_context(self, helper, state, calls, directory):
+        stack = ExitStack()
+        for name, value in [('getuid', helper.UID), ('geteuid', helper.UID), ('getgid', helper.GID),
+                            ('getgroups', [helper.GID])]:
+            stack.enter_context(patch.object(helper.os, name, return_value=value))
+        stack.enter_context(patch.dict(helper.ENVIRONMENT, TMPDIR=directory))
+        stack.enter_context(patch.object(helper.subprocess, 'run',
+                                        side_effect=self.canonical_execution(helper, state, calls)))
+        # Registry routing files only. Opening any ambient auth file is forbidden.
+        stack.enter_context(patch.object(helper.Path, 'read_text', side_effect=FileNotFoundError))
+        stack.enter_context(patch.object(helper.Path, 'exists', return_value=False))
+        return stack
+
+    def test_canonical_present_and_absent_then_repeat_are_idempotent(self):
+        for uid in [947, 20481]:
+            for initially_present in [True, False]:
+                helper = self.canonical(uid)
+                state, calls = {'present': initially_present}, []
+                with tempfile.TemporaryDirectory() as directory, \
+                     self.canonical_context(helper, state, calls, directory), \
+                     patch.dict(os.environ, {'HOME': '/root', 'REGISTRY_AUTH_FILE': '/ambient/auth',
+                                             'DOCKER_CONFIG': '/ambient/docker', 'CONTAINER_HOST': 'ssh://other',
+                                             'HTTPS_PROXY': 'http://other'}):
+                    first = helper.converge()
+                    self.assertEqual(first, {'changed': not initially_present, 'reference': helper.IMAGE,
+                                             'image_id': 'sha256:' + 'b' * 64, 'digest': 'sha256:' + 'a' * 64})
+                    second = helper.converge()
+                    self.assertFalse(second['changed'])
+                    self.assertEqual(sum('pull' in c for c in calls), int(not initially_present))
+                    for ref in [helper.IMAGE, first['image_id']]:
+                        self.assertEqual(sum(c[2:] == ['image', 'inspect', '--', ref] for c in calls), 2)
+                    self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_canonical_failure_states_stop_without_acquisition_fallback(self):
+        helper = self.canonical()
+        cases = [
+            {'prerequisite_failed': True}, {'rootful': True}, {'exists_rc': 125},
+            {'store': {'graphRoot': '/root/.local/share/containers/storage'}},
+            {'store': {'runRoot': '/run/user/1/containers'}},
+            {'store': {'configFile': '/etc/containers/storage.conf'}},
+            {'inspect_failed': True}, {'inspection_raw': 'not JSON'}, {'inspection_raw': '[]'},
+            {'inspection_raw': '[{}, {}]'}, {'inspection_raw': '{}'},
+            {'inspection': {'Id': 'short'}}, {'inspection': {'Digest': ''}},
+            {'inspection': {'RepoDigests': []}}, {'inspection': {'RepoDigests': ['other@sha256:' + 'a' * 64]}},
+            {'by_id': {'Id': 'c' * 64}}, {'by_id': {'Digest': 'sha256:' + 'c' * 64}},
+            {'by_id': {'RepoDigests': []}},
+        ]
+        for absent in [False, True]:
+            for failure in cases + ([{'pull_failed': True}] if absent else []):
+                with self.subTest(absent=absent, failure=failure), tempfile.TemporaryDirectory() as directory:
+                    state, calls = {'present': not absent, **failure}, []
+                    with self.canonical_context(helper, state, calls, directory), \
+                         self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                        helper.converge()
+                    self.assertLessEqual(sum('pull' in c for c in calls), int(absent))
+                    if set(failure) & {'prerequisite_failed', 'rootful', 'exists_rc', 'store'}:
+                        self.assertFalse(any('pull' in c for c in calls))
+
+    def test_canonical_rejects_wrong_identity_and_ambiguous_inputs_before_podman(self):
+        helper = self.canonical()
+        for identity in [('getuid', 0), ('geteuid', 0), ('getgid', 0), ('getgroups', [helper.GID, 0])]:
+            with tempfile.TemporaryDirectory() as directory:
+                calls = []
+                with self.canonical_context(helper, {'present': True}, calls, directory), \
+                     patch.object(helper.os, identity[0], return_value=identity[1]), self.assertRaises(ValueError):
+                    helper.converge()
+                self.assertEqual(calls, [])
+        for reference in ['example.invalid/workspace:latest', 'workspace@sha256:' + 'a' * 64,
+                          'ns/workspace@sha256:' + 'a' * 64, helper.IMAGE + '\n', helper.IMAGE.upper(),
+                          'docker://' + helper.IMAGE, 'dir:/tmp/image@sha256:' + 'a' * 64,
+                          'oci-archive:/tmp/image@sha256:' + 'a' * 64]:
+            with patch.object(helper, 'IMAGE', reference), patch.object(helper.subprocess, 'run') as run, \
+                 self.assertRaises(ValueError):
+                helper.repository_digest()
+            run.assert_not_called()
+
+    def test_canonical_multiarch_index_and_optional_tag_keep_exact_digest_binding(self):
+        helper = self.canonical()
+        index = helper.IMAGE
+        expected = helper.repository_digest()
+        with patch.object(helper, 'IMAGE', index.replace('@', ':policy@')):
+            self.assertEqual(helper.repository_digest(), expected)
+        with tempfile.TemporaryDirectory() as directory:
+            state = {'present': True, 'inspection': {'Digest': 'sha256:' + 'c' * 64,
+                     'RepoDigests': [index, index.split('@')[0] + '@sha256:' + 'c' * 64]}}
+            with self.canonical_context(helper, state, [], directory):
+                self.assertEqual(helper.converge()['digest'], 'sha256:' + 'c' * 64)
+
+    def test_canonical_credential_helpers_fail_closed_without_reading_auth(self):
+        helper = self.canonical()
+        config_paths = ['/etc/containers/registries.conf',
+                        '/srv/mcp-podman/runner/.config/containers/registries.conf',
+                        '/etc/containers/registries.conf.d/custom.conf',
+                        '/srv/mcp-podman/runner/.config/containers/registries.conf.d/custom.conf']
+        for target in config_paths:
+            for config, rejects in [('', False), ('credential-helpers = []', False),
+                                     ('credential-helpers = ["containers-auth.json"]', False),
+                                     ('credential-helpers = ["secretservice"]', True), ('not toml', True)]:
+                def read(path):
+                    self.assertIn(str(path), config_paths)
+                    return config if str(path) == target else ''
+                with self.subTest(target=target, config=config), \
+                     patch.object(helper.Path, 'read_text', read), \
+                     patch.object(helper.Path, 'exists', return_value=True), \
+                     patch.object(helper.Path, 'glob', lambda p, pattern: [p / 'custom.conf']):
+                    if rejects:
+                        with self.assertRaises(ValueError):
+                            helper.verify_credential_helpers()
+                    else:
+                        helper.verify_credential_helpers()
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+            with self.canonical_context(helper, {'present': False}, calls, directory), \
+                 patch.object(helper, 'verify_credential_helpers', side_effect=ValueError('credentials')), \
+                 self.assertRaises(ValueError):
+                helper.converge()
+            self.assertFalse(any('pull' in c for c in calls))
 
     def test_tunnel_config_and_fail_closed_start_sequence(self):
         for uid, port in [(947, 8080), (20481, 18080)]:
@@ -283,6 +459,40 @@ class RenderedContract(unittest.TestCase):
 
 class SourceContract(unittest.TestCase):
     @unittest.skipUnless(shutil.which('ansible-playbook'), 'ansible-playbook unavailable')
+    def test_canonical_task_changed_reporting_and_failure_gate(self):
+        original = yaml.safe_load((ROLE / 'tasks/canonical_image.yml').read_text())[0]
+        self.assertIs(original['become'], True)
+        self.assertEqual(original['become_user'], 'mcp-runner')
+        self.assertEqual(original['ansible.builtin.command']['argv'],
+                         ['/usr/bin/env', '-i', '/usr/bin/python3', '-I',
+                          '/usr/local/lib/mcp-workspaced/canonical-image'])
+        self.assertEqual(original['ansible.builtin.command']['chdir'], '{{ mcp_runner_home }}')
+        self.assertNotIn('failed_when', original)
+        self.assertNotIn('ignore_errors', original)
+        with tempfile.TemporaryDirectory(prefix='s3e-image-gate-') as directory:
+            plays = []
+            for name, output, rc in [('present', '{"changed":false}', 0),
+                                     ('absent', '{"changed":true}', 0),
+                                     ('failed', '', 1), ('malformed', 'not JSON', 0)]:
+                script = Path(directory) / (name + '.py')
+                script.write_text('import sys\nprint(' + repr(output) + ')\nsys.exit(' + str(rc) + ')\n')
+                task = deepcopy(original)
+                task['become'] = False
+                task['ansible.builtin.command'] = {'argv': ['/usr/bin/python3', '-I', str(script)]}
+                failed = name in ['failed', 'malformed']
+                plays.append({'hosts': 'localhost', 'connection': 'local', 'gather_facts': False,
+                              'become': False, 'tasks': [
+                    {'ansible.builtin.set_fact': {'activated': False, 'blocked': False}},
+                    {'block': [task, {'ansible.builtin.set_fact': {'activated': True}}],
+                     'rescue': [{'ansible.builtin.set_fact': {'blocked': True}}]},
+                    {'ansible.builtin.assert': {'that': [
+                        'blocked == ' + str(failed), 'activated == ' + str(not failed),
+                        'mcp_canonical_image_convergence.changed == ' + str(name == 'absent')]
+                        if not failed else ['blocked', 'not activated']}}]})
+            result = ansible(plays, directory)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which('ansible-playbook'), 'ansible-playbook unavailable')
     def test_production_configuration_rejects_invalid_inputs(self):
         cases = []
         def reject(name, mutate):
@@ -292,6 +502,8 @@ class SourceContract(unittest.TestCase):
         reject('nonloopback', lambda v: v['mcp_production_endpoint'].update(address='0.0.0.0'))
         reject('boolean port', lambda v: v['mcp_production_endpoint'].update(port=True))
         reject('floating image', lambda v: v.update(mcp_canonical_image='example.invalid/workspace:latest'))
+        reject('second canonical source', lambda v: v['mcp_workspaced_config'].update(
+            image='example.invalid/another@sha256:' + 'b' * 64))
         reject('image line break', lambda v: v.update(mcp_canonical_image=v['mcp_canonical_image'] + '\n'))
         reject('missing policy', lambda v: v['mcp_workspaced_config'].pop('nofile'))
         reject('arbitrary flag', lambda v: v['mcp_workspaced_config'].update(daemon=True))
