@@ -270,10 +270,16 @@ class SourceBoundary(unittest.TestCase):
             'roles/s3e/templates/mcp-workspaced.service.j2'])
         self.assertEqual(sorted(p.name for p in (ROOT / 'roles').iterdir()),
                          ['data_bootstrap', 's3a', 's3b', 's3c', 's3d', 's3e'])
-        # This slice deliberately adds no workflow or runner. Fail closed on a
-        # future workflow until its source-only execution boundary is reviewed.
+        # #148 authorizes only the canonical-image build/test/publish workflow.
+        # Keep unknown workflows and target/deployment runners fail-closed.
         workflows = ROOT.parent / '.github/workflows'
-        self.assertFalse(workflows.exists() and any(workflows.iterdir()))
+        self.assertEqual(sorted(p.name for p in workflows.iterdir()), ['canonical-image.yml'])
+        workflow = yaml.safe_load((workflows / 'canonical-image.yml').read_text())
+        for job in workflow['jobs'].values():
+            self.assertEqual(job['runs-on'], 'ubuntu-24.04-arm')
+            for step in job['steps']:
+                self.assertNotRegex(step.get('run', ''),
+                                    r'\b(?:ansible(?:-playbook)?|ssh|scp|sftp)\b|site\.yml')
         for role in ('s3a', 's3b', 's3c', 's3d', 's3e'):
             for path in (ROOT / f'roles/{role}').rglob('*'):
                 if not path.is_file() or '__pycache__' in path.parts:

@@ -89,6 +89,12 @@ def main():
         else:
             unavailable('readelf artifact linkage inspection')
     verify_deployment_source()
+    try:
+        import yaml
+    except ImportError as exc:
+        unavailable('Canonical image workflow/source checks: ' + str(exc))
+    else:
+        run([sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'images/canonical', '-p', 'test_*.py', '-v'])
     run(['git', 'diff', '--check'])
     run(['git', 'diff', '--cached', '--check'])
     print('Source checks completed' + (' WITH UNSUPPORTED CHECKS' if unsupported else ': PASS'))
