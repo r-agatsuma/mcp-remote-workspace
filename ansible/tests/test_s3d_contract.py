@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,9 @@ planner = load('mcp_network_plan_test', ROOT / 'library/mcp_network_plan.py')
 HOSTS = ['11.12.13.14', '2600:1234::5']  # Synthetic host identities, no network use.
 DNS = ['9.9.9.9', '2606:4700:4700::1111', '8.8.4.4']
 ENDPOINT = yaml.safe_load((ROOT / 'group_vars/all.yml').read_text())['mcp_production_endpoint']
+EVIDENCE = ROOT / 'tests/fixtures/issue55-grant6115658421'
+HISTORICAL_LIVE = {family: (EVIDENCE / f'live.v{family}.exact').read_text() for family in (4, 6)}
+HISTORICAL_PERSISTENT = {family: (EVIDENCE / f'rules.v{family}.exact').read_text() for family in (4, 6)}
 BASE = '''*filter
 :INPUT DROP [12:34]
 :FORWARD DROP [0:0]
@@ -370,12 +374,201 @@ class Rendering(unittest.TestCase):
                 network.persistence_defaults(bad)
 
 
+class BaselineGate(unittest.TestCase):
+    def render(self, live=HISTORICAL_LIVE, saved=HISTORICAL_PERSISTENT, uid=947, endpoint=ENDPOINT):
+        return network.render_rule_pair(live, saved, uid, HOSTS, endpoint)
+
+    def test_independent_archived_fixture_hashes_and_reviewed_identities(self):
+        # Recorded on #131, independently verified against archived manifest and
+        # baseline.json before copying these exact bytes. No production generator.
+        raw = {
+            'rules.v4.exact': '02bef6508e4f471a2d6ffffe849c3ad04ad87c9a101ab4785c18054d041d63b2',
+            'rules.v6.exact': '8bc66a914076cc16f945fbef6ab0aa196ea0dd47380d1aada79205e48d0a0dd7',
+            'live.v4.exact': '1a5568a30ca9c3e40c5b13c03f842c7a039a5491e0eec6921676c2fefccccfb5',
+            'live.v6.exact': 'bc48341838e6dedf65cf9f15488ded8cfeee52bddc370f482aff4b76123d796f',
+        }
+        structural = {
+            'rules.v4.exact': 'c310c48e912e93934bf74bda7bc2ec2757867334e6cc07c6bd3b74f5c4b596db',
+            'live.v4.exact': '48475b2dde3592a726cdfeff06cf232043bbc3dfa94fd52340bda01009db9824',
+            'live.v6.exact': '4851ec3ce356f13692cf237a40e28daf951feb5bc054716a24f28d403fa89e6d',
+        }
+        for filename, expected in raw.items():
+            data = (EVIDENCE / filename).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), expected)
+            if filename in structural:
+                self.assertEqual(network.save_identity(network.parse_save(data.decode())), structural[filename])
+        self.assertEqual(network.BASELINE_PERSISTENT4, structural['rules.v4.exact'])
+        self.assertEqual(network.BASELINE_PERSISTENT6_RAW, raw['rules.v6.exact'])
+        self.assertEqual(network.BASELINE_LIVE, {family: structural[f'live.v{family}.exact'] for family in (4, 6)})
+
+    def test_original_landed_strict_comparator_rejects_measured_pair(self):
+        self.assertIn('-p udp --dport 123 ', HISTORICAL_PERSISTENT[4])
+        self.assertIn('-p udp -m udp --dport 123 ', HISTORICAL_LIVE[4])
+        self.assertNotEqual(network.unowned(network.parse_save(HISTORICAL_PERSISTENT[4])),
+                            network.unowned(network.parse_save(HISTORICAL_LIVE[4])))
+        # render_rules retains the actual landed strict-equality code path.
+        with self.assertRaisesRegex(ValueError, 'live/persistent unrelated policy differs'):
+            network.render_rules(HISTORICAL_LIVE[4], HISTORICAL_PERSISTENT[4], 947, 4, HOSTS, ENDPOINT)
+        with self.assertRaisesRegex(ValueError, 'non-save command'):
+            network.parse_save(HISTORICAL_PERSISTENT[6])
+        with self.assertRaisesRegex(ValueError, 'non-save command'):
+            network.render_rules(HISTORICAL_LIVE[6], HISTORICAL_PERSISTENT[6], 947, 6, HOSTS, ENDPOINT)
+
+    def test_exact_reviewed_pair_composes_only_from_live_and_keeps_hook_order(self):
+        rendered = self.render()
+        for family in (4, 6):
+            canonical = network.unowned(network.parse_save(HISTORICAL_LIVE[family]))
+            self.assertEqual(network.unowned(network.parse_save(rendered[family])), canonical)
+            self.assertEqual(rendered[family], network.render_rules(
+                HISTORICAL_LIVE[family], HISTORICAL_LIVE[family], 947, family, HOSTS, ENDPOINT))
+            output = [line for line in network.parse_save(rendered[family])['filter']
+                      if line.startswith('-A OUTPUT ')]
+            self.assertEqual(output, [f'-A OUTPUT -m owner --uid-owner 947 -m comment '
+                f'--comment {network.MARKER} -j {network.CHAIN}'] +
+                [line for line in canonical['filter'] if line.startswith('-A OUTPUT ')])
+            self.assertNotIn('\n-F ', rendered[family])
+        self.assertIn('-p udp -m udp --dport 123 ', rendered[4])
+        self.assertNotIn('-p udp --dport 123 ', rendered[4])
+
+    def test_strict_canonical_rerun_owned_recomposition_and_partial_convergence(self):
+        rendered = self.render()
+        self.assertEqual(self.render(rendered, rendered), rendered)
+        # Known original files plus already-owned live state are also bounded.
+        self.assertEqual(self.render(rendered), rendered)
+        for family in (4, 6):
+            partial = dict(HISTORICAL_PERSISTENT)
+            partial[family] = rendered[family]
+            self.assertEqual(self.render(rendered, partial), rendered)
+        updated = self.render(rendered, rendered, uid=20481, endpoint=dict(ENDPOINT, port=18443))
+        for family in (4, 6):
+            self.assertEqual(updated[family].count('--uid-owner 20481 '), 1)
+            self.assertNotIn('--uid-owner 947 ', updated[family])
+            self.assertEqual(network.unowned(network.parse_save(updated[family])),
+                             network.unowned(network.parse_save(HISTORICAL_LIVE[family])))
+        self.assertIn(reply_rule(18443), updated[4])
+        self.assertNotIn(reply_rule(ENDPOINT['port']), updated[4])
+        self.assertNotIn('--ctorigdstport', updated[6])
+
+    def test_unknown_policy_presence_order_and_syntax_stop_even_if_both_sides_agree(self):
+        for family in (4, 6):
+            source = HISTORICAL_LIVE[family]
+            rule = next(line for line in source.splitlines() if line.startswith('-A INPUT '))
+            mutations = {
+                'built-in policy': source.replace(':OUTPUT ACCEPT', ':OUTPUT DROP'),
+                'addition': source.replace('COMMIT', '-A OUTPUT -p tcp --dport 443 -j ACCEPT\nCOMMIT'),
+                'removal': source.replace(rule + '\n', ''),
+                'order': source.replace(rule + '\n', '').replace('COMMIT', rule + '\nCOMMIT'),
+                'unexpected chain': source.replace(':OUTPUT ACCEPT', ':FOREIGN - [0:0]\n:OUTPUT ACCEPT'),
+                'unexpected table': source + '*raw\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n',
+                'incomplete': source.replace('COMMIT\n', ''),
+                'restore command': source.replace('COMMIT', '-F INPUT\nCOMMIT'),
+                'equivalent option order': source.replace('-A INPUT -i lo -j ACCEPT', '-A INPUT -j ACCEPT -i lo'),
+            }
+            if family == 4:
+                mutations.update({
+                    'destination': source.replace('169.254.0.2/32', '169.254.0.3/32', 1),
+                    'protocol': source.replace('-p icmp', '-p udp', 1),
+                    'port': source.replace('--dport 123 ', '--dport 124 '),
+                    # UDP/123 without -m udp is the reviewed persistent identity;
+                    # UDP/53 without it is a distinct, unreviewed variation.
+                    'optional module': source.replace('-p udp -m udp --dport 53', '-p udp --dport 53'),
+                })
+            else:
+                mutations.update({
+                    'destination': source.replace('-A INPUT -i lo ', '-A INPUT -d ::1/128 -i lo ', 1),
+                    'protocol': source.replace('-p udp -m udp', '-p tcp -m tcp'),
+                    'port': source.replace('--dport 546 ', '--dport 545 '),
+                    'optional module': source.replace('-p udp -m udp', '-p udp'),
+                })
+            for name, changed in mutations.items():
+                self.assertNotEqual(changed, source, name)
+                live = dict(HISTORICAL_LIVE)
+                live[family] = changed
+                saved = dict(HISTORICAL_PERSISTENT)
+                saved[family] = changed
+                for side, inputs in [('live', (live, HISTORICAL_PERSISTENT)),
+                                     ('persistent', (HISTORICAL_LIVE, saved)), ('both', (live, saved))]:
+                    with self.subTest(family=family, mutation=name, side=side), self.assertRaises(ValueError):
+                        self.render(*inputs)
+
+    def test_historical_persistent_drift_and_ipv6_raw_identity_are_exact(self):
+        for family in (4, 6):
+            source = HISTORICAL_PERSISTENT[family]
+            variants = [source.replace(':OUTPUT ACCEPT', ':OUTPUT DROP'),
+                        source.replace('COMMIT', '-A OUTPUT -j ACCEPT\nCOMMIT'), '', None]
+            if family == 4:
+                variants += [source.replace('--dport 123 ', '--dport 124 '),
+                             source.replace('-p udp --dport 123', '-p udp -m udp -m udp --dport 123')]
+            else:
+                variants += [source + '# unreviewed raw bytes\n', source.replace('-F INPUT\n', ''),
+                             source.replace('-F INPUT\n-F FORWARD', '-F FORWARD\n-F INPUT'),
+                             source.replace('-F INPUT', '-F  INPUT'), source.replace('\n', '\r\n')]
+            for changed in variants:
+                saved = dict(HISTORICAL_PERSISTENT)
+                saved[family] = changed
+                with self.subTest(family=family, changed=changed), self.assertRaises(ValueError):
+                    self.render(saved=saved)
+
+    def test_reserved_chain_and_hook_collisions_in_either_family_or_side_stop(self):
+        rendered = self.render()
+        for family in (4, 6):
+            source = HISTORICAL_LIVE[family]
+            collisions = [source.replace('COMMIT', ':MCP_S3D_OUTPUT - [0:0]\nCOMMIT'),
+                          source.replace('COMMIT', '-A OUTPUT -j MCP_S3D_OUTPUT\nCOMMIT'),
+                          rendered[family].replace('--comment mcp-s3d-output-v1', '--comment foreign'),
+                          rendered[family].replace(':MCP_S3D_OUTPUT - ', ':MCP_S3D_OUTPUT DROP '),
+                          rendered[family].replace('COMMIT', '-A INPUT -j MCP_S3D_OUTPUT\nCOMMIT'),
+                          source + '*nat\n:MCP_S3D_OUTPUT - [0:0]\nCOMMIT\n']
+            for collision in collisions:
+                for side in ('live', 'persistent'):
+                    live, saved = dict(HISTORICAL_LIVE), dict(HISTORICAL_PERSISTENT)
+                    (live if side == 'live' else saved)[family] = collision
+                    with self.subTest(family=family, side=side), self.assertRaises(ValueError):
+                        self.render(live, saved)
+
+    def test_both_family_gates_precede_composition_and_no_unknown_bootstrap(self):
+        for family in (4, 6):
+            for source in ['', BASE]:
+                live = dict(HISTORICAL_LIVE)
+                saved = dict(HISTORICAL_PERSISTENT)
+                live[family] = saved[family] = source
+                with patch.object(network, 'render_rules') as compose:
+                    with self.assertRaises(ValueError):
+                        self.render(live, saved)
+                    compose.assert_not_called()
+            with self.assertRaises(ValueError):
+                self.render({family: HISTORICAL_LIVE[family]}, HISTORICAL_PERSISTENT)
+
+    def test_only_existing_save_counter_and_file_comment_normalization(self):
+        live = {family: source.replace('[0:0]', '[42:1234]') + '# counter snapshot\n'
+                for family, source in HISTORICAL_LIVE.items()}
+        saved = dict(HISTORICAL_PERSISTENT)
+        saved[4] = saved[4].replace('[0:0]', '[10:20]') + '# persistent comment\n'
+        self.assertEqual(self.render(live, saved), self.render())
+
+
 class Planner(unittest.TestCase):
-    def run_plan(self, uid=947, gid=952, account=None, nss='hosts: files dns\n', assigned=None, saved=None, endpoint=ENDPOINT):
+    def test_trusted_read_preserves_exact_ipv6_bytes_including_line_endings(self):
+        with tempfile.TemporaryDirectory(prefix='s3d-baseline-read-') as directory:
+            path = Path(directory) / 'rules.v6'
+            for source in [HISTORICAL_PERSISTENT[6], HISTORICAL_PERSISTENT[6].replace('\n', '\r\n')]:
+                path.write_bytes(source.encode('utf-8'))
+                # Synthetic root ownership metadata; no privileged file operation.
+                info = types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o640)
+                with patch.object(planner.os, 'fstat', return_value=info):
+                    saved = planner.trusted_read(str(path))
+                self.assertEqual(saved.encode('utf-8'), path.read_bytes())
+                if '\r' in saved:
+                    with self.assertRaises(ValueError):
+                        network.render_rule_pair(HISTORICAL_LIVE,
+                            {4: HISTORICAL_PERSISTENT[4], 6: saved}, 947, HOSTS, ENDPOINT)
+
+    def run_plan(self, uid=947, gid=952, account=None, nss='hosts: files dns\n', assigned=None,
+                 saved=HISTORICAL_PERSISTENT, endpoint=ENDPOINT, live=HISTORICAL_LIVE, restore_calls=None):
         def read(path, optional=False):
             if path == '/etc/nsswitch.conf':
                 return nss
-            return None if path == '/etc/default/netfilter-persistent' else saved
+            return None if path == '/etc/default/netfilter-persistent' else saved[int(path[-1])]
 
         def execute(argv, data=None):
             if argv[0] == '/usr/sbin/ip':
@@ -387,8 +580,10 @@ class Planner(unittest.TestCase):
             if argv[0].endswith('-legacy-save'):
                 return ''
             if argv[0].endswith('-save'):
-                return BASE
+                return live[6 if 'ip6tables' in argv[0] else 4]
             if argv[-1] == '--test':
+                if restore_calls is not None:
+                    restore_calls.append(argv)
                 self.assertIn('--uid-owner ' + str(uid), data)
                 return ''
             self.fail('unexpected command: ' + repr(argv))
@@ -416,6 +611,18 @@ class Planner(unittest.TestCase):
         for nss in ['hosts: files resolve dns\n', 'hosts: files mdns4_minimal dns\n', '']:
             with self.assertRaisesRegex(ValueError, 'NSS'):
                 self.run_plan(nss=nss)
+
+    def test_either_family_baseline_failure_prevents_all_restore_tests(self):
+        for family in (4, 6):
+            live = dict(HISTORICAL_LIVE)
+            live[family] = live[family].replace(':OUTPUT ACCEPT', ':OUTPUT DROP')
+            saved = dict(HISTORICAL_PERSISTENT)
+            saved[family] = saved[family].replace(':OUTPUT ACCEPT', ':OUTPUT DROP')
+            for kwargs in [dict(live=live), dict(saved=saved)]:
+                calls = []
+                with self.subTest(family=family, side=next(iter(kwargs))), self.assertRaises(ValueError):
+                    self.run_plan(**kwargs, restore_calls=calls)
+                self.assertEqual(calls, [])
 
     def test_shared_endpoint_reaches_renderer_and_invalid_input_stops_before_host_reads(self):
         for port in [1, ENDPOINT['port'], 18443, 65535]:

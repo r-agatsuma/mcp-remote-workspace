@@ -4,12 +4,25 @@ Trusted inputs preserve current build_dns.go's native public resolver exclusions
 General egress separately preserves globally reachable IPv4 suballocations.
 Do not use ipaddress.is_global: its special-use table varies by Python version.
 """
+import hashlib
 import ipaddress
 import re
 import shlex
 
 CHAIN = 'MCP_S3D_OUTPUT'
 MARKER = 'mcp-s3d-output-v1'
+# Issue #130 / accepted #131 evidence: Issue #55, grant 6115658421.
+# Save identities hash the ordered parse_save representation serialized as
+# *table\n + lines joined by \n + \nCOMMIT\n, with no table/option sorting.
+# Independent exact evidence and provenance live in tests/fixtures/.
+BASELINE_LIVE = {
+    4: '48475b2dde3592a726cdfeff06cf232043bbc3dfa94fd52340bda01009db9824',
+    6: '4851ec3ce356f13692cf237a40e28daf951feb5bc054716a24f28d403fa89e6d',
+}
+BASELINE_PERSISTENT4 = 'c310c48e912e93934bf74bda7bc2ec2757867334e6cc07c6bd3b74f5c4b596db'
+# IPv6's historical restore-only file is recognized by exact UTF-8 bytes,
+# never parsed/interpreted as save syntax and never used for composition.
+BASELINE_PERSISTENT6_RAW = '8bc66a914076cc16f945fbef6ab0aa196ea0dd47380d1aada79205e48d0a0dd7'
 RESOLVER_DENY4 = (
     '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
     '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24',
@@ -204,6 +217,7 @@ def unowned(tables):
 
 
 def render_rules(live, persistent, uid, family, hosts, endpoint):
+    """Strict save composer; deployment must first pass render_rule_pair's gate."""
     base = unowned(parse_save(live))
     if persistent is not None:
         parsed = parse_save(persistent)
@@ -217,6 +231,41 @@ def render_rules(live, persistent, uid, family, hosts, endpoint):
     base['filter'] = declarations + [f':{CHAIN} - [0:0]', hook] + owned + rules
     return ''.join('*' + table + '\n' + '\n'.join(values) + '\nCOMMIT\n'
                    for table, values in base.items())
+
+
+def save_identity(tables):
+    representation = ''.join('*' + table + '\n' + '\n'.join(lines) + '\nCOMMIT\n'
+                             for table, lines in tables.items())
+    return hashlib.sha256(representation.encode('utf-8')).hexdigest()
+
+
+def render_rule_pair(live, persistent, uid, hosts, endpoint):
+    """Gate both families against reviewed identities before composing either.
+
+    Historical persistent input and canonical live save are separate identities,
+    not equivalent syntax. Only counters and file comments in save grammar have
+    the existing parser's normalization. In particular no UDP or -F rewriting
+    occurs here. Strict reruns must still retain the reviewed unowned baseline;
+    matching unknown live/persistent state is not authority to adopt it.
+    """
+    require(set(live) == set(persistent) == {4, 6}, 'both firewall families required')
+    for family in (4, 6):
+        base = unowned(parse_save(live[family]))
+        require(save_identity(base) == BASELINE_LIVE[family],
+                f'unreviewed IPv{family} live baseline; operator reconciliation required')
+        saved = persistent[family]
+        require(saved is not None, f'missing IPv{family} persistent baseline')
+        if family == 6 and hashlib.sha256(saved.encode('utf-8')).hexdigest() == BASELINE_PERSISTENT6_RAW:
+            continue
+        parsed = parse_save(saved)
+        if family == 4 and save_identity(parsed) == BASELINE_PERSISTENT4:
+            continue
+        # Ordinary post-convergence reconciliation retains the strict comparator
+        # and reserved-chain checks, bounded to the same canonical live baseline.
+        require(bool(parsed) and base == unowned(parsed),
+                f'unreviewed IPv{family} persistent baseline; operator reconciliation required')
+    return {family: render_rules(live[family], live[family], uid, family, hosts, endpoint)
+            for family in (4, 6)}
 
 
 def direct_resolv_conf(resolvers):
