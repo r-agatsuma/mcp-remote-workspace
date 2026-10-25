@@ -46,6 +46,9 @@ responsibilities; actual network/DNS effectiveness is deferred to #95.
 
 For deployment and service operation, use the [S3 operator runbook](docs/operations.md).
 The complete local source/static check is `./scripts/verify-source`.
+The repository-owned [canonical workspace image](images/canonical/README.md)
+has a separate arm64 build/smoke and candidate-publication workflow; production
+selection remains an explicit digest decision under #144.
 
 ## Go baseline
 

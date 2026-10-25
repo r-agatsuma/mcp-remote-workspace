@@ -1,0 +1,138 @@
+name: Canonical workspace image
+
+on:
+  pull_request:
+    paths:
+      - 'images/canonical/**'
+      - '.github/workflows/canonical-image.yml'
+      - 'scripts/verify-source'
+  push:
+    branches: [main]
+    paths:
+      - 'images/canonical/**'
+      - '.github/workflows/canonical-image.yml'
+      - 'scripts/verify-source'
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/r-agatsuma/mcp-workspace-base
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Source contract checks
+        run: python3 -m unittest discover -s images/canonical -p 'test_*.py' -v
+      - name: Build native arm64 candidate
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(uname -m)" = aarch64
+          docker build --platform linux/arm64 --no-cache --provenance=false --sbom=false \
+            --build-arg "SOURCE_REVISION=$SOURCE_REVISION" \
+            --tag "$IMAGE:sha-$SOURCE_REVISION" images/canonical
+      - name: Smoke and collect evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          python3 images/canonical/smoke.py --revision "$SOURCE_REVISION" \
+            --evidence "$RUNNER_TEMP/evidence" docker "$IMAGE:sha-$SOURCE_REVISION"
+          sha256sum images/canonical/Dockerfile > "$RUNNER_TEMP/evidence/Dockerfile.sha256"
+          cp images/canonical/Dockerfile "$RUNNER_TEMP/evidence/Dockerfile"
+          {
+            echo "Source revision: $SOURCE_REVISION"
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo 'Platform: linux/arm64; user: 0; workdir: /workspace'
+            echo 'Image checks PASS; no production/rootless/#95 claim.'
+            echo 'PR, schedule and manual runs discard the image; only main push can publish.'
+          } | tee "$RUNNER_TEMP/evidence/build.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save validated image for main publication only
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: docker image save --output "$RUNNER_TEMP/canonical.tar" "$IMAGE:sha-$SOURCE_REVISION"
+      - name: Transfer validated image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: canonical-validated-image
+          path: ${{ runner.temp }}/canonical.tar
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Preserve image validation evidence
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: canonical-validation-evidence
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 30
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: canonical-validated-image
+          path: ${{ runner.temp }}
+      - name: Load exact validated artifact
+        run: docker image load --input "$RUNNER_TEMP/canonical.tar"
+      - name: Login with bounded workflow token
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          DOCKER_CONFIG: ${{ runner.temp }}/ghcr-auth
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+      - name: Publish candidate and record immutable arm64 manifest
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          DOCKER_CONFIG: ${{ runner.temp }}/ghcr-auth
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/publication"
+          docker push "$IMAGE:sha-$SOURCE_REVISION" | tee "$RUNNER_TEMP/publication/push.txt"
+          docker image inspect "$IMAGE:sha-$SOURCE_REVISION" > "$RUNNER_TEMP/publication/image-inspect.json"
+          DIGEST=$(jq -er --arg prefix "$IMAGE@" \
+            '.[0].RepoDigests[] | select(startswith($prefix)) | split("@")[1]' \
+            "$RUNNER_TEMP/publication/image-inspect.json")
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" > "$RUNNER_TEMP/publication/manifest.json"
+          test "sha256:$(sha256sum "$RUNNER_TEMP/publication/manifest.json" | cut -d ' ' -f 1)" = "$DIGEST"
+          jq -e '.schemaVersion == 2 and (has("manifests") | not) and
+            (.mediaType == "application/vnd.docker.distribution.manifest.v2+json" or
+             .mediaType == "application/vnd.oci.image.manifest.v1+json")' "$RUNNER_TEMP/publication/manifest.json"
+          {
+            echo "Candidate only: $IMAGE@$DIGEST"
+            echo 'Digest kind: single linux/arm64 platform manifest; no multi-platform index.'
+            echo "Source revision: $SOURCE_REVISION"
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo 'No SBOM/provenance attestations added; Dockerfile/base/package evidence is in canonical-validation-evidence.'
+            echo 'Human checkpoint: make GHCR package Public, then verify anonymous exact-digest retrieval before #144 selection.'
+            echo 'No #144, Ansible, or production digest has been updated.'
+          } | tee "$RUNNER_TEMP/publication/candidate.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove workflow login state
+        if: always()
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/ghcr-auth
+        run: docker logout ghcr.io
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: canonical-publication-evidence
+          path: ${{ runner.temp }}/publication/
+          retention-days: 30
+          if-no-files-found: error
