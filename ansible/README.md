@@ -404,16 +404,46 @@ table versions. Trusted inputs retain current `build_dns.go` exclusions and
 additionally reject the platform VIP and IANA's non-public protocol remainder.
 IPv6 classification and application Go behavior are unchanged.
 
-Unrelated chain declarations, INPUT/FORWARD policies and rule order, other
-OUTPUT rules and other tables are retained; only packet counters and save-file
-comments are normalized. A successful empty live save on a fresh host has no
-explicit filter table, so the planner materializes its implicit ACCEPT baseline.
-An existing empty/incomplete persistent file is rejected. Unrelated live and
-persistent policy must agree before either file is written. Drift, reserved-chain
+The deployment planner requires the reviewed pre-S3D canonical baseline from
+Issue #55 / grant `6115658421`, recovered and Human-accepted in #131 and selected
+by #130. Exact evidence-derived rulesets are checked in under
+`tests/fixtures/issue55-grant6115658421/`; production acceptance uses reviewed
+SHA-256 representation identities, without loading test fixtures at runtime.
+Both IPv4 and IPv6 identities must pass before either restore test or persistent
+write. Missing/empty files and unknown baselines, including matching unknown
+live/persistent state, STOP rather than being adopted.
+
+For save grammar, the identity serializes the existing `parse_save` result as
+`*<table>\n<ordered lines>\nCOMMIT\n` in observed table order. Only the existing
+chain-counter and file-comment/whitespace handling applies; rule text, option
+order, rule comments, chain policy and unrelated rule ordering remain exact.
+The reviewed IPv4 persistent representation contains `-p udp --dport 123`, while
+its corresponding canonical live save contains `-p udp -m udp --dport 123`.
+Each matches its own identity; no optional-protocol-module normalization or
+generic semantic equivalence is performed. The historical IPv6 persistent file
+contains restore-only `-F INPUT`, `-F FORWARD` and `-F OUTPUT`. Only its exact
+UTF-8 byte hash is recognized; these commands are never interpreted or stripped,
+and the generic save parser continues to reject them.
+
+Composition always starts from the canonical live save. After convergence the
+written files contain that live baseline plus S3D-owned state. Reruns strip only
+S3D ownership, require ordinary strict live/persistent equality and retain the
+same reviewed unowned identity. This also permits a known partial convergence
+where one persistent family is already canonical and the other is historical.
+Unrelated declarations, INPUT/FORWARD policies, OUTPUT rules, other tables and
+ordering are preserved within that reviewed identity. Drift, reserved-chain
 collisions, legacy policy, unexpected persistence plugins or competing active /
 boot-enabled firewall services fail rather than being overwritten. Provisioning
 must have exclusive control of the firewall during convergence; this is not a
 coordinator for concurrent root/operator rule writers.
+
+Historical evidence establishes Ubuntu 24.04.5 / arm64, kernels
+`7.0.0-1012-oracle` and `7.0.0-1013-oracle`, and iptables/ip6tables/save
+1.8.10 with the nf_tables backend. Exact historical persistence-package versions
+were not recovered. These are evidence provenance, distinct from the existing
+deployment package policy below; #130's non-blocking P2 owns version-envelope
+policy. #130 source/static tests do not establish real-host convergence, #95,
+restore serialization of newly composed policy, or reboot/runtime acceptance.
 
 The role installs Noble `iptables=1.8.10-*`, `iptables-persistent=1.0.20` and
 `netfilter-persistent=1.0.20` without installer autosave, package removal or

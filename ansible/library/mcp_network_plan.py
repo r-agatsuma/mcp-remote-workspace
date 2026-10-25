@@ -9,7 +9,7 @@ import subprocess
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.mcp_network import (
     direct_resolv_conf, inputs, literal, parse_save, persistence_defaults, ping_sysctl,
-    production_endpoint, render_rules, require,
+    production_endpoint, render_rule_pair, require,
 )
 
 
@@ -19,7 +19,8 @@ def trusted_read(path, optional=False):
     except FileNotFoundError:
         require(optional, 'missing trusted file: ' + path)
         return None
-    with os.fdopen(fd, encoding='utf-8') as source:
+    # Preserve line endings for the historical IPv6 exact-byte identity.
+    with os.fdopen(fd, encoding='utf-8', newline='') as source:
         info = os.fstat(source.fileno())
         require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_gid == 0
                 and not info.st_mode & 0o022, 'unsafe trusted file: ' + path)
@@ -58,15 +59,17 @@ def plan(uid, gid, resolvers, hosts, endpoint):
         legacy = parse_save(command(['/usr/sbin/' + family + '-legacy-save']))
         require(all(all(line.startswith(':') and ' ACCEPT ' in line for line in lines)
                     for lines in legacy.values()), 'existing legacy firewall policy')
-    files = {}
+    live, persistent = {}, {}
     for family, name in ((4, 'iptables'), (6, 'ip6tables')):
         path = '/etc/iptables/rules.v' + str(family)
-        saved = trusted_read(path, optional=True)
-        live = command(['/usr/sbin/' + name + '-nft-save'])
-        rendered = render_rules(live, saved, uid, family, hosts, endpoint)
-        # Both families must parse before either persistent file is changed.
-        command(['/usr/sbin/' + name + '-nft-restore', '--test'], rendered)
-        files['v' + str(family)] = rendered
+        persistent[family] = trusted_read(path, optional=True)
+        live[family] = command(['/usr/sbin/' + name + '-nft-save'])
+    rendered = render_rule_pair(live, persistent, uid, hosts, endpoint)
+    files = {}
+    for family, name in ((4, 'iptables'), (6, 'ip6tables')):
+        # Both baseline identities pass before either restore test or file write.
+        command(['/usr/sbin/' + name + '-nft-restore', '--test'], rendered[family])
+        files['v' + str(family)] = rendered[family]
     return dict(public_dns=dns, rules=files, resolv_conf=direct_resolv_conf(dns),
                 ping_sysctl=ping_sysctl(uid, gid), persistence_defaults=defaults)
 

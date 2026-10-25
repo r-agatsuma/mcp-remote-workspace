@@ -1,0 +1,20 @@
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-F INPUT
+-F FORWARD
+-F OUTPUT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 1 -j ACCEPT
+-A INPUT -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 2/0 -j ACCEPT
+-A INPUT -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 3/0 -j ACCEPT
+-A INPUT -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 4/1 -j ACCEPT
+-A INPUT -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 4/2 -j ACCEPT
+-A INPUT -s fe80::/10 -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 134/0 -m hl --hl-eq 255 -j ACCEPT
+-A INPUT -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 135/0 -m hl --hl-eq 255 -j ACCEPT
+-A INPUT -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 136/0 -m hl --hl-eq 255 -j ACCEPT
+-A INPUT -s fe80::/10 -i enp0s6 -p ipv6-icmp -m icmp6 --icmpv6-type 130/0 -m hl --hl-eq 1 -j ACCEPT
+-A INPUT -i enp0s6 -p udp -m udp --sport 547 --dport 546 -j ACCEPT
+COMMIT
