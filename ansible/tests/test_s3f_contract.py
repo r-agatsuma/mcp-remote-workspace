@@ -131,7 +131,8 @@ class Composition(unittest.TestCase):
                            {'ansible.builtin.import_tasks': str(ROOT / 'roles/s3e/tasks/configuration.yml')}]
                 for role, name in [('s3b', 'runtime.env'), ('s3b', 'storage.conf'), ('s3b', 'containers.conf'),
                                    ('s3b', 'data.mount'), ('s3e', 'mcp-workspaced.service'),
-                                   ('s3e', 'mcp-tunnel.service'), ('s3e', 'recover.py'), ('s3e', 'tunnel.yaml')]:
+                                   ('s3e', 'mcp-tunnel.service'), ('s3e', 'recover.py'), ('s3e', 'tunnel.yaml'),
+                                   ('s3e', 'canonical-image.py')]:
                     actions.append({'ansible.builtin.template': {
                         'src': str(ROOT / f'roles/{role}/templates/{name}.j2'), 'dest': str(directory / name)}})
                 result = ansible(play(values, actions), directory)
@@ -144,6 +145,12 @@ class Composition(unittest.TestCase):
                 self.assertEqual((install['owner'], install['group'], install['mode']), ('root', 'root', '0755'))
                 self.assertEqual(command[:4], [install['dest'], '-daemon', '-mcp-listen', f'127.0.0.1:{port}'])
                 recovery = module(directory / 'recover.py')
+                canonical = module(directory / 'canonical-image.py')
+                self.assertEqual(canonical.ENVIRONMENT, recovery.ENVIRONMENT)
+                self.assertEqual((canonical.UID, canonical.GID), (uid, gid))
+                self.assertEqual(canonical.GRAPHROOT, '/srv/mcp-podman/runner/.local/share/containers/storage')
+                self.assertEqual(canonical.IMAGE, values['mcp_canonical_image'])
+                self.assertEqual(canonical.PODMAN, ['/usr/bin/podman', '--remote=false'])
                 self.assertEqual(command[4:], recovery.SHARED_ARGV)
                 flags = {}
                 for flag, value in zip(command[4::2], command[5::2]):
@@ -215,6 +222,29 @@ class Composition(unittest.TestCase):
 
 
 class SourceBoundary(unittest.TestCase):
+    def test_canonical_convergence_is_reachable_before_all_production_activation(self):
+        sequence = list(reachable_tasks(ROOT / 'roles/s3e/tasks/main.yml'))
+        converge = next(i for i, (path, task) in enumerate(sequence)
+                        if path.name == 'canonical_image.yml' and 'ansible.builtin.command' in task)
+        render = next(i for i, (_, task) in enumerate(sequence) if task.get('register') == 'mcp_service_render')
+        self.assertLess(render, converge)
+        render_task = sequence[render][1]
+        install = next(v for v in render_task['loop'] if v['src'] == 'canonical-image.py.j2')
+        self.assertEqual(install, {'src': 'canonical-image.py.j2',
+                                  'dest': '/usr/local/lib/mcp-workspaced/canonical-image', 'mode': '0755'})
+        self.assertEqual((render_task['ansible.builtin.template']['owner'],
+                          render_task['ansible.builtin.template']['group']), ('root', 'root'))
+        for i, (_, task) in enumerate(sequence):
+            self.assertFalse(set(task) & {'rescue', 'ignore_errors', 'ignore_unreachable'})
+            if 'ansible.builtin.systemd_service' in task:
+                self.assertLess(converge, i)
+        helper = (ROOT / 'roles/s3e/templates/canonical-image.py.j2').read_text()
+        self.assertIn('/usr/local/lib/mcp-workspaced/service-prerequisites', helper)
+        self.assertNotIn('socket', helper)
+        self.assertNotIn('resolv.conf', helper)
+        runtime = (ROOT.parent / 'internal/workspace/podman.go').read_text()
+        self.assertIn('"container", "create", "--pull=never"', runtime)
+
     def test_only_landed_roles_and_no_hidden_bootstrap_import(self):
         site = yaml.safe_load((ROOT / 'site.yml').read_text())
         self.assertEqual(site[0]['roles'], ['s3a', 's3b', 's3c', 's3d', 's3e'])

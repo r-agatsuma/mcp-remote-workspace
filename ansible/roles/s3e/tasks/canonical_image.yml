@@ -1,0 +1,14 @@
+---
+- name: Converge the exact canonical image as the final runner with no inherited environment
+  become: true
+  become_user: mcp-runner
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/env
+      - -i
+      - /usr/bin/python3
+      - -I
+      - /usr/local/lib/mcp-workspaced/canonical-image
+    chdir: "{{ mcp_runner_home }}"
+  register: mcp_canonical_image_convergence
+  changed_when: mcp_canonical_image_convergence.rc == 0 and (mcp_canonical_image_convergence.stdout | from_json).changed

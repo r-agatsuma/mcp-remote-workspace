@@ -74,7 +74,10 @@ slice.
 
 The optional `-daemon` mode requires `-image` with a canonical `@sha256:<64 lowercase
 hex characters>` reference already installed in the service account's local image
-store. `-state-dir` optionally selects an absolute private journal directory;
+store. Production Ansible owns provisioning and verifying this operator-selected
+digest before service activation; canonical workspace creation still uses
+`--pull=never` and never acquires that image at runtime.
+`-state-dir` optionally selects an absolute private journal directory;
 the default is `.local/state/mcp-workspaced` under the OS-recorded account home.
 `-podman` selects an absolute host executable (default `/usr/bin/podman`). Startup
 reconciliation finishes before the daemon announces readiness and waits for

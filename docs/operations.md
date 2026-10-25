@@ -44,14 +44,19 @@ variables file with these inputs (see `ansible/group_vars/all.yml`):
 | `mcp_runner_subuid_start`, `mcp_runner_subgid_start`, `mcp_runner_subid_count` | Explicit non-overlapping subordinate allocations |
 | `mcp_public_dns` | Ordered one-to-three trusted public literal resolvers; no built-in production list |
 | `mcp_host_public_ips` | All public host addresses, including provider NAT/floating addresses |
-| `mcp_canonical_image` | Approved digest-pinned reference, already installed in the runner's local store |
+| `mcp_canonical_image` | Operator-selected public, fully qualified registry/repository `@sha256:<64 lowercase hex>` reference; Ansible provisions it |
 | `mcp_tunnel_id` | Operator-provisioned Tunnel identifier; separate from the key |
 | `mcp_production_endpoint` | Fixed `127.0.0.1` and selected port; one source for firewall, listener and Tunnel |
 
-The canonical image already being present is an application prerequisite;
-`site.yml` does not populate it or create a Tunnel object. Do not invent a pull,
-image migration or control-plane provisioning procedure here. If those trusted
-inputs are unavailable, STOP and return to the responsible provisioning task.
+The operator selects and configures the exact canonical digest; `site.yml` owns
+its convergence into the final `mcp-runner` rootless store before production
+service activation. Include the explicit repository namespace (`library/` for
+Docker Hub official images); ambiguous short names are rejected. Manual image
+pre-installation is not required. The daemon consumes the provisioned image
+with `--pull=never`; presence at application execution time remains required.
+Ansible does not create a Tunnel object or migrate generations between images.
+If these trusted inputs are unavailable, STOP and return to the responsible
+provisioning task.
 Kernel/runtime, native overlay, NSS and existing firewall prerequisites are
 checked by the landed roles; conflicts are STOP, not permission to replace
 unrelated policy. Keep the complete shared `mcp_workspaced_config` mapping from
@@ -123,12 +128,29 @@ ansible-playbook -i "$INVENTORY_PATH" site.yml -e "@$NONSECRET_INPUTS_PATH"
 ```
 
 The fixed sequence is S3A application/identities, S3B verified Data/runtime,
-S3C unattended user manager, S3D network/DNS, then S3E services. This entry never
+S3C unattended user manager, S3D network/DNS, then S3E canonical-image convergence
+and services. This entry never
 imports destructive bootstrap. It verifies the selected filesystem/UUID and
 mounts Data; missing or wrong Data never falls back to formatting or Boot.
 Application installation uses `/usr/local/bin/mcp-workspaced` as root:root 0755.
 Production services are enabled and started, or restarted when the binary or
 service configuration changes. This is a host mutation, not a static command.
+
+S3E checks the configured exact image locally as the final runner, using the
+same Data HOME/XDG, runtime/bus and TMPDIR as the service. It verifies rootless
+store paths and immutable inspected identity before any service start/restart.
+Present state does not pull and reports no acquisition change. Absent state
+acquires only the configured digest, verifies its repository/digest association
+and immutable local ID, and reports changed; repeat convergence verifies locally.
+Old canonical images, external base images and shared cache are retained.
+
+The acquisition context uses an explicit empty authfile and client certificate
+directory; inherited auth/proxy/remote overrides are discarded. Ambient registry
+credential helpers are rejected. The existing S3D resolver/egress boundary is
+used without exceptions. Acquisition/inspection failure stops before service
+activation. Private-registry credentials or policy weakening require a separate
+Human decision; never bypass this gate with login, a proxy or runtime pulling.
+See [S3E mechanism and identity checks](../ansible/README.md#s3e-production-services-and-trusted-recovery).
 
 A failed task may leave partial convergence. Preserve the failure evidence and
 identify the failed prerequisite before another attempt. Do not treat all
@@ -342,7 +364,7 @@ race toolchain followed by failed repository tests is a failure. Synthetic
 systemd unit parsing is not real systemd execution.
 
 `ansible/tests/test_s3f_contract.py` connects production identity derivation,
-S3B environment, S3C manager, S3D planner outputs and S3E service/recovery/Tunnel
+S3B environment, S3C manager, S3D planner outputs and S3E image/service/recovery/Tunnel
 renders using two synthetic identities, ports and resolver orders. Independent
 fixed path/account anchors and the actual install task guard against shared
 mistakes; existing S3B–S3E tests cover negative gates, secret metadata and bounded
@@ -350,3 +372,14 @@ recovery actions. Source inventory checks protect bootstrap separation and the
 single authority/service/runner boundary. These are drift checks, not an exhaustive
 secret detector or a replacement for independent source review and manual
 redaction review of changed docs/configuration/examples.
+
+The #141 image tests use mocked Podman responses and synthetic Ansible command
+results. They establish source behavior for present/absent/repeat convergence,
+identity/store/credential rejection and service-task ordering. They do not
+establish real image fetches, registry credential isolation, Podman multiarch
+inspection behavior or deployed network/DNS effectiveness. After independent
+review and landing, separately authorized #95 must verify the composed path on
+the dirty target: exact image absent in the final runner store, reviewed Ansible
+acquisition through deployed S3D DNS/egress, immutable identity verification,
+service activation, canonical `workspace_create()` without a runtime pull and
+the intended container image binding. Repeat convergence must show no reacquisition.

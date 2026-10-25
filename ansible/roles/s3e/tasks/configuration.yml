@@ -25,6 +25,7 @@
       - mcp_workspaced_config['state-dir'] == mcp_workspace_state_dir
       - mcp_workspaced_config['data-dir'] == mcp_workspace_data_dir
       - mcp_workspaced_config.podman == '/usr/bin/podman'
+      - mcp_workspaced_config.image == mcp_canonical_image
       - mcp_workspaced_config.image is match('^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}\Z')
       - mcp_workspaced_config['public-dns'] == mcp_public_dns_validated
       - mcp_public_dns_validated | length >= 1 and mcp_public_dns_validated | length <= 3

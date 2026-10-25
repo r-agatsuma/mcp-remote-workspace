@@ -92,6 +92,7 @@
     mode: "{{ item.mode }}"
   loop:
     - {src: prerequisites.py.j2, dest: /usr/local/lib/mcp-workspaced/service-prerequisites, mode: '0755'}
+    - {src: canonical-image.py.j2, dest: /usr/local/lib/mcp-workspaced/canonical-image, mode: '0755'}
     - {src: recover.py.j2, dest: /usr/local/lib/mcp-workspaced/recover, mode: '0755'}
     - {src: tunnel-preflight.py.j2, dest: /usr/local/lib/mcp-tunnel/preflight, mode: '0755'}
     - {src: mcp-workspaced.service.j2, dest: /etc/systemd/system/mcp-workspaced.service, mode: '0644'}
@@ -106,6 +107,9 @@
     group: mcp-tunnel
     mode: '0640'
   register: mcp_tunnel_config_render
+
+- name: Establish the canonical image prerequisite before production service activation
+  ansible.builtin.import_tasks: canonical_image.yml
 
 - name: Reload production unit definitions
   ansible.builtin.systemd_service:

@@ -41,6 +41,8 @@ mcp_host_public_ips: []
 
 # S3E: the only shared daemon/recovery configuration authority. ReferencePolicy
 # values are deployment policy; image and Tunnel ID must be supplied by operator.
+# S3E converges this exact public, fully qualified digest reference in the final
+# runner store before service activation. Runtime canonical creation never pulls.
 mcp_canonical_image: REPLACE_WITH_CANONICAL_IMAGE_AT_SHA256
 mcp_tunnel_id: REPLACE_WITH_TUNNEL_ID
 mcp_workspaced_config:
