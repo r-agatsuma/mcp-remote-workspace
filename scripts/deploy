@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Formal controller entry; validate is local-only, run is an authorized mutation.
+
+No pass-through Ansible arguments, inventory plugins, vars files or SSH config.
+Credentials are never inputs. SSH authentication uses the operator's agent.
+"""
+import argparse
+import base64
+from datetime import datetime, timezone
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from deployment.manifest import locator, mapping, match, parse, require, validate
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def encoded(value):
+    return (json.dumps(value, sort_keys=True, indent=2) + '\n').encode()
+
+
+def read_input(path, private=False):
+    # Read once, then use these exact bytes throughout; no parser reopens a path.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        metadata = os.fstat(stream.fileno())
+        require(stat.S_ISREG(metadata.st_mode), 'regular input file required')
+        if private:
+            require(metadata.st_uid == os.getuid() and stat.S_IMODE(metadata.st_mode) == 0o600
+                    and not path.resolve().is_relative_to(ROOT),
+                    'run inputs must be operator-owned mode 0600 files outside the checkout')
+        raw = stream.read(65537)
+    require(len(raw) <= 65536, 'input exceeds 64 KiB')
+    return raw
+
+
+def git(root, *args):
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    return subprocess.check_output(['git', '--no-optional-locks', '-C', str(root), *args], env=env)
+
+
+def source_binding(root, revision):
+    require(git(root, 'rev-parse', 'HEAD').decode().strip() == revision,
+            'controller HEAD differs from manifest source revision')
+    require(not git(root, 'status', '--porcelain', '--untracked-files=no'),
+            'tracked controller source is dirty')
+
+
+def snapshot(root, revision, directory):
+    # Export only committed files. Untracked/ignored group_vars, host_vars,
+    # ansible.cfg and plugins from the user's checkout cannot enter this run.
+    archive = git(root, 'archive', '--format=tar', revision)
+    with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+        for member in source.getmembers():
+            require(not Path(member.name).is_absolute() and '..' not in Path(member.name).parts
+                    and (member.isfile() or member.isdir()), 'unsupported source archive member')
+        source.extractall(directory, filter='data')
+
+
+def private_write(path, raw):
+    with path.open('xb') as stream:
+        stream.write(raw)
+    path.chmod(0o600)
+
+
+def bootstrap_grant(raw, manifest, manifest_hash, inventory_hash):
+    grant = parse(raw)
+    expected = {
+        'authorize': 'format-blank-data',
+        'source_revision': manifest['mcp_source_revision'],
+        'manifest_sha256': manifest_hash,
+        'inventory_sha256': inventory_hash,
+        'host_key_sha256': manifest['mcp_target_ssh_host_key_sha256'],
+        'data_device_id': manifest['mcp_data_device_id'],
+    }
+    require(grant == expected, 'Human destructive grant must name this exact bound target/candidate')
+
+
+def final_observation(raw, manifest, manifest_hash, inventory_hash):
+    record = parse(raw)
+    mapping(record, {'manifest_sha256', 'inventory_sha256', 'host_key_sha256',
+                     'observed_at', 'public_ips', 'provider_evidence_sha256', 'guest_evidence_sha256'})
+    require(record['manifest_sha256'] == manifest_hash and record['inventory_sha256'] == inventory_hash
+            and record['host_key_sha256'] == manifest['mcp_target_ssh_host_key_sha256'],
+            'final observation belongs to a different candidate')
+    from deployment.manifest import literal_ip
+    addresses = record['public_ips']
+    require(type(addresses) is list and bool(addresses), 'fresh complete address list required')
+    parsed = [literal_ip(address) for address in addresses]
+    require(len(set(parsed)) == len(parsed)
+            and set(parsed) == {literal_ip(address) for address in manifest['mcp_host_public_ips']},
+            'fresh public-address set differs from manifest')
+    for key in ('provider_evidence_sha256', 'guest_evidence_sha256'):
+        require(match(record[key], r'[0-9a-f]{64}'), 'restricted observation evidence SHA256 required')
+    require(match(record['observed_at'], r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'), 'UTC observation time required')
+    observed = datetime.strptime(record['observed_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    require(observed <= datetime.now(timezone.utc), 'future observation is invalid')
+    # No invented universal freshness TTL. The responsible operator must
+    # establish consumption-time freshness and attribution for this very entry.
+    return record
+
+
+def pinned_key(scan, expected):
+    matches = set()
+    for line in scan.splitlines():
+        if line.startswith('#'):
+            continue
+        fields = line.split()
+        require(len(fields) == 3, 'malformed SSH key observation')
+        _, kind, blob = fields
+        require(match(kind, r'ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)'), 'unsupported SSH host key')
+        try:
+            digest = base64.b64encode(hashlib.sha256(base64.b64decode(blob, validate=True)).digest()).decode().rstrip('=')
+        except ValueError:
+            raise ValueError('malformed SSH public key') from None
+        if 'SHA256:' + digest == expected:
+            matches.add(kind + ' ' + blob)
+    require(len(matches) == 1, 'SSH host key does not match accepted manifest fingerprint')
+    return matches.pop()
+
+
+def connection_options(known_hosts):
+    return ['-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+            '-o', 'UserKnownHostsFile=' + str(known_hosts), '-o', 'GlobalKnownHostsFile=/dev/null',
+            '-o', 'HostKeyAlias=mcp-deployment', '-o', 'UpdateHostKeys=no',
+            '-o', 'VerifyHostKeyDNS=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+            '-o', 'ConnectionAttempts=1', '-o', 'ConnectTimeout=15', '-o', 'IdentitiesOnly=no',
+            '-o', 'IdentityFile=none', '-o', 'PasswordAuthentication=no',
+            '-o', 'KbdInteractiveAuthentication=no', '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes']
+
+
+def arguments(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument('action', choices=['validate', 'run'])
+    parser.add_argument('stage', choices=['bootstrap', 'final'])
+    parser.add_argument('--manifest', required=True, type=Path)
+    parser.add_argument('--inventory', required=True, type=Path, help='strict host/port/user locator YAML')
+    parser.add_argument('--manifest-sha256')
+    parser.add_argument('--inventory-sha256')
+    parser.add_argument('--evidence-dir', type=Path, help='new restricted directory outside the checkout')
+    parser.add_argument('--bootstrap-grant', type=Path)
+    parser.add_argument('--final-observation', type=Path)
+    args = parser.parse_args(argv)
+    require(not (args.stage == 'bootstrap' and args.final_observation), 'bootstrap cannot consume final observation')
+    require(not (args.stage == 'final' and args.bootstrap_grant), 'final cannot consume destructive grant')
+    if args.action == 'run':
+        require(match(args.manifest_sha256, r'[0-9a-f]{64}')
+                and match(args.inventory_sha256, r'[0-9a-f]{64}') and args.evidence_dir,
+                'run requires accepted manifest/inventory hashes and a new evidence directory')
+        require(args.bootstrap_grant if args.stage == 'bootstrap' else args.final_observation,
+                'run requires its stage-specific grant/observation')
+    return args
+
+
+def main(argv=None):
+    args = arguments(argv)
+    raw = read_input(args.manifest, private=args.action == 'run')
+    inventory_raw = read_input(args.inventory, private=args.action == 'run')
+    manifest, location = validate(raw, args.stage), locator(inventory_raw)
+    manifest_hash, inventory_hash = sha(raw), sha(inventory_raw)
+    source_binding(ROOT, manifest['mcp_source_revision'])
+    for accepted, actual in [(args.manifest_sha256, manifest_hash), (args.inventory_sha256, inventory_hash)]:
+        require(accepted is None or accepted == actual, 'accepted input hash differs from consumed bytes')
+    binding = {'stage': args.stage, 'source_revision': manifest['mcp_source_revision'],
+               'manifest_sha256': manifest_hash, 'inventory_sha256': inventory_hash}
+    if args.action == 'validate':
+        print(json.dumps(binding, sort_keys=True))
+        return 0
+
+    grant_raw = read_input(args.bootstrap_grant, private=True) if args.bootstrap_grant else None
+    observation_raw = read_input(args.final_observation, private=True) if args.final_observation else None
+    if grant_raw is not None:
+        bootstrap_grant(grant_raw, manifest, manifest_hash, inventory_hash)
+        binding['bootstrap_grant_sha256'] = sha(grant_raw)
+    if observation_raw is not None:
+        final_observation(observation_raw, manifest, manifest_hash, inventory_hash)
+        binding['final_observation_sha256'] = sha(observation_raw)
+        require(sys.stdin.isatty(), 'final entry requires operator consumption-time freshness confirmation')
+
+    evidence = args.evidence_dir.resolve()
+    require(not evidence.is_relative_to(ROOT), 'evidence must be outside the checkout')
+    os.umask(0o077)
+    evidence.mkdir(mode=0o700)  # Never overwrite or reuse a previous invocation.
+    private_write(evidence / 'manifest.yml', raw)
+    private_write(evidence / 'locator.yml', inventory_raw)
+    if grant_raw is not None:
+        private_write(evidence / 'bootstrap-grant.yml', grant_raw)
+    if observation_raw is not None:
+        private_write(evidence / 'final-observation.yml', observation_raw)
+
+    executable = shutil.which('ansible-playbook')
+    require(executable is not None, 'Ansible controller is unavailable')
+    with tempfile.TemporaryDirectory(prefix='mcp-deploy-') as temporary:
+        directory = Path(temporary)
+        checkout = directory / 'source'
+        snapshot(ROOT, manifest['mcp_source_revision'], checkout)
+        home = directory / 'home'
+        home.mkdir()
+        env = {'PATH': str(Path(sys.executable).parent) + os.pathsep + os.defpath,
+               'HOME': str(home), 'LANG': 'C.UTF-8',
+               'ANSIBLE_CONFIG': str(checkout / 'ansible/ansible.cfg'),
+               'ANSIBLE_NOCOLOR': '1', 'ANSIBLE_HOST_KEY_CHECKING': 'True',
+               'ANSIBLE_SSH_RETRIES': '0', 'PYTHONDONTWRITEBYTECODE': '1'}
+        if 'SSH_AUTH_SOCK' in os.environ:
+            env['SSH_AUTH_SOCK'] = os.environ['SSH_AUTH_SOCK']
+        addresses = {item[4][0] for item in socket.getaddrinfo(location['host'], location['port'], type=socket.SOCK_STREAM)}
+        require(len(addresses) == 1, 'locator must resolve unambiguously for this invocation')
+        address = addresses.pop()
+        scan = subprocess.run(['ssh-keyscan', '-T', '15', '-p', str(location['port']), address],
+                              env=env, capture_output=True, text=True, timeout=60, check=True)
+        key = pinned_key(scan.stdout, manifest['mcp_target_ssh_host_key_sha256'])
+        known_hosts = directory / 'known_hosts'
+        private_write(known_hosts, ('mcp-deployment ' + key + '\n').encode())
+        options = connection_options(known_hosts)
+        # The scan is untrusted key retrieval, never TOFU. Prove possession using
+        # the accepted key before requesting freshness confirmation or mutation.
+        subprocess.run(['ssh', *options, '-p', str(location['port']), '-l', location['user'],
+                        address, '/usr/bin/true'], env=env, capture_output=True, check=True, timeout=30)
+        if observation_raw is not None:
+            print('Fresh provider + guest observations must be unambiguously joined to this authenticated host;')
+            print('their complete public-address set must still equal this manifest at consumption.')
+            answer = input('After verifying that prerequisite NOW, type the final observation SHA256: ')
+            require(answer == sha(observation_raw), 'freshness/attribution not confirmed; STOP before mutation')
+            binding['freshness_confirmed_at'] = datetime.now(timezone.utc).isoformat()
+        inventory = {'all': {'children': {'mcp_hosts': {'hosts': {'mcp_target': {
+            'ansible_host': address, 'ansible_user': location['user'], 'ansible_port': location['port'],
+            'ansible_connection': 'ssh', 'ansible_ssh_args': shlex.join(options),
+            'ansible_ssh_common_args': '', 'ansible_ssh_extra_args': '',
+            'ansible_sftp_extra_args': '', 'ansible_scp_extra_args': '',
+        }}}}}}
+        variables = dict(manifest)
+        if args.stage == 'bootstrap':
+            variables['mcp_data_bootstrap_enabled'] = True
+        inventory_path, variables_path = directory / 'inventory.json', directory / 'variables.json'
+        private_write(inventory_path, encoded(inventory))
+        private_write(variables_path, encoded(variables))
+        private_write(evidence / 'effective-inventory.json', encoded(inventory))
+        private_write(evidence / 'validated-layer2.json', encoded(variables))
+        binding.update(host_key_sha256=manifest['mcp_target_ssh_host_key_sha256'], resolved_address=address,
+                       effective_inventory_sha256=sha(encoded(inventory)),
+                       validated_layer2_sha256=sha(encoded(variables)))
+        # Recheck checkout state immediately before the immutable snapshot runs.
+        source_binding(ROOT, manifest['mcp_source_revision'])
+        private_write(evidence / 'binding.json', encoded(binding))
+        play = 'bootstrap-data.yml' if args.stage == 'bootstrap' else 'site.yml'
+        command = [executable, '-i', str(inventory_path), play, '--extra-vars', '@' + str(variables_path)]
+        with (evidence / 'ansible.log').open('xb') as log:
+            result = subprocess.run(command, cwd=checkout / 'ansible', env=env, stdout=log, stderr=subprocess.STDOUT)
+        private_write(evidence / 'result.json', encoded({'exit_code': result.returncode}))
+        require(result.returncode == 0, 'Ansible failed; preserve restricted evidence, no automatic retry/repair')
+    print(json.dumps({'stage': args.stage, 'source_revision': manifest['mcp_source_revision'],
+                      'manifest_sha256': manifest_hash, 'inventory_sha256': inventory_hash,
+                      'result': 'Ansible completed; runtime acceptance is separate'}, sort_keys=True))
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (ValueError, OSError, subprocess.SubprocessError, EOFError):
+        # Exception strings from external commands can include private inputs.
+        print('STOP: deployment preflight/execution failed; inspect restricted evidence and input contracts. No retry.',
+              file=sys.stderr)
+        sys.exit(1)

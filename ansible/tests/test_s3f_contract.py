@@ -257,7 +257,7 @@ class SourceBoundary(unittest.TestCase):
                       bootstrap[0]['ansible.builtin.assert']['that'])
         defaults = yaml.safe_load((ROOT / 'group_vars/all.yml').read_text())
         self.assertNotIn('mcp_data_bootstrap_enabled', defaults)
-        self.assertEqual(defaults['mcp_public_dns'], [])
+        self.assertEqual(defaults['mcp_public_dns'], ['8.8.8.8', '8.8.4.4'])
 
     def test_service_authority_inventory_and_no_deployment_runner(self):
         # Independent inventory: any new installed service/template requires an

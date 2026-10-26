@@ -1,0 +1,14 @@
+---
+# Placeholder-only final schema. Real values belong outside the public checkout.
+# No policy overrides, credentials, bootstrap enable or locator fields allowed.
+mcp_source_revision: REPLACE_WITH_REVIEWED_40_LOWERCASE_HEX_COMMIT
+mcp_target_ssh_host_key_sha256: REPLACE_WITH_HUMAN_ACCEPTED_SSH_SHA256_FINGERPRINT
+mcp_data_device_id: REPLACE_WITH_WHOLE_DEVICE_STABLE_BY_ID
+mcp_data_expected_serial: REPLACE_WITH_EXACT_UDEV_ID_SERIAL
+mcp_data_expected_sector_bytes: REPLACE_WITH_OBSERVED_INTEGER_512_OR_4096
+mcp_data_uuid: REPLACE_WITH_INDEPENDENTLY_VERIFIED_FILESYSTEM_UUID
+mcp_runner_subuid_start: REPLACE_WITH_POSITIVE_INTEGER_ALLOCATION
+mcp_runner_subgid_start: REPLACE_WITH_POSITIVE_INTEGER_ALLOCATION
+mcp_host_public_ips:
+  - REPLACE_WITH_COMPLETE_CURRENT_NATIVE_LITERAL_PUBLIC_ADDRESS_SET
+mcp_tunnel_id: REPLACE_WITH_SELECTED_TUNNEL_ID

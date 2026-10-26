@@ -768,7 +768,7 @@ class Source(unittest.TestCase):
                                    ['/usr/lib/systemd/systemd-sysctl', '--prefix=net/ipv4/ping_group_range']])
         self.assertFalse(any(task.get('become_user') for task in tasks))
         defaults = yaml.safe_load((ROOT / 'group_vars/all.yml').read_text())
-        self.assertEqual(defaults['mcp_public_dns'], [])
+        self.assertEqual(defaults['mcp_public_dns'], ['8.8.8.8', '8.8.4.4'])
         self.assertEqual(defaults['mcp_host_public_ips'], [])
         self.assertNotIn('mcp_runner_uid', defaults)
         self.assertNotIn('mcp_runner_primary_gid', defaults)

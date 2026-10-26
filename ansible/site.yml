@@ -3,6 +3,11 @@
   hosts: mcp_hosts
   become: true
   gather_facts: true
+  vars:
+    mcp_deployment_stage: final
+  pre_tasks:
+    - name: Require source policy and fresh final Data identity before mutation
+      ansible.builtin.import_tasks: tasks/deployment_preflight.yml
   roles:
     - s3a
     - s3b

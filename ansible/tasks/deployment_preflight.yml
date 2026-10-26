@@ -1,0 +1,25 @@
+---
+- name: Require the reviewed source-owned reference policy before mutation
+  ansible.builtin.assert:
+    that:
+      - mcp_data_expected_bytes is integer and mcp_data_expected_bytes == 107374182400
+      - mcp_runner_subid_count is integer and mcp_runner_subid_count == 65536
+      - mcp_public_dns == ['8.8.8.8', '8.8.4.4']
+      - mcp_canonical_image == 'ghcr.io/r-agatsuma/mcp-workspace-base@sha256:8af2148405bfa66bfd522d820145ccd7a19ca9f9cfe39ee609861d082b1680d8'
+    fail_msg: 'STOP: source-owned v0 reference policy cannot be overridden by deployment input.'
+
+- name: Reobserve the stage-specific guest Data identity before any mutation
+  mcp_data_preflight:
+    identity: "{{ mcp_data_device_id }}"
+    serial: "{{ mcp_data_expected_serial }}"
+    size: "{{ mcp_data_expected_bytes }}"
+    sector: "{{ mcp_data_expected_sector_bytes }}"
+    stage: "{{ mcp_deployment_stage }}"
+    uuid: "{{ mcp_data_uuid if mcp_deployment_stage == 'final' else '' }}"
+  register: mcp_deployment_data_evidence
+
+- name: Record fresh non-secret guest identity evidence in restricted invocation output
+  ansible.builtin.debug:
+    msg:
+      guest_data_evidence: "{{ mcp_deployment_data_evidence.evidence }}"
+      guest_data_evidence_sha256: "{{ mcp_deployment_data_evidence.evidence | to_json | hash('sha256') }}"

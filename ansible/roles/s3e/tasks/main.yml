@@ -111,6 +111,9 @@
 - name: Establish the canonical image prerequisite before production service activation
   ansible.builtin.import_tasks: canonical_image.yml
 
+- name: Bind the rendered non-secret configuration before production service activation
+  ansible.builtin.import_tasks: ../../../tasks/deployment_configuration_evidence.yml
+
 - name: Reload production unit definitions
   ansible.builtin.systemd_service:
     daemon_reload: true

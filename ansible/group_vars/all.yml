@@ -1,5 +1,6 @@
 ---
 mcp_source_revision: REPLACE_WITH_40_HEX_COMMIT
+mcp_target_ssh_host_key_sha256: REPLACE_WITH_ACCEPTED_SSH_SHA256_FINGERPRINT
 
 mcp_runner_user: mcp-runner
 mcp_tunnel_user: mcp-tunnel
@@ -25,25 +26,29 @@ mcp_workspace_state_dir: /srv/mcp-podman/runner/.local/state/mcp-workspaced
 # Trusted per-host inputs. These placeholders intentionally fail closed.
 mcp_data_device_id: /dev/disk/by-id/REPLACE_WITH_WHOLE_DATA_DEVICE_ID
 mcp_data_expected_serial: REPLACE_WITH_EXPECTED_UDEV_ID_SERIAL
-mcp_data_expected_bytes: 0
-mcp_data_expected_sector_bytes: 512
+# Source-owned v0 reference capacity, not a universal storage invariant.
+mcp_data_expected_bytes: 107374182400
+mcp_data_expected_sector_bytes: 0
 mcp_data_uuid: REPLACE_WITH_BOOTSTRAP_RESULT_UUID
 mcp_runner_subuid_start: 0
 mcp_runner_subgid_start: 0
+# Source-owned reference allocation length; starts remain host-selected.
 mcp_runner_subid_count: 65536
 
-# S3D trusted ordered literal resolver inputs. Empty deliberately fails closed.
-# No production resolver IP is an architecture default.
-mcp_public_dns: []
+# Source-owned v0 reference-deployment policy (#152), not universal product
+# invariants. Changes require a reviewed source revision, never manifest vars.
+mcp_public_dns:
+  - 8.8.8.8
+  - 8.8.4.4
 # All host public addresses, including provider NAT/floating addresses that are
 # not assigned to a NIC. Interface-local addresses are also denied dynamically.
 mcp_host_public_ips: []
 
 # S3E: the only shared daemon/recovery configuration authority. ReferencePolicy
-# values are deployment policy; image and Tunnel ID must be supplied by operator.
+# values and the canonical image are source policy; only Tunnel ID is per-instance.
 # S3E converges this exact public, fully qualified digest reference in the final
 # runner store before service activation. Runtime canonical creation never pulls.
-mcp_canonical_image: REPLACE_WITH_CANONICAL_IMAGE_AT_SHA256
+mcp_canonical_image: ghcr.io/r-agatsuma/mcp-workspace-base@sha256:8af2148405bfa66bfd522d820145ccd7a19ca9f9cfe39ee609861d082b1680d8
 mcp_tunnel_id: REPLACE_WITH_TUNNEL_ID
 mcp_workspaced_config:
   image: "{{ mcp_canonical_image }}"
