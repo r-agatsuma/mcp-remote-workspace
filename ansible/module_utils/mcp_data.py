@@ -93,7 +93,19 @@ def inspect(identity):
                 holders=os.listdir(sys + '/holders'), slaves=os.listdir(sys + '/slaves'),
                 root_known=root_known, boot_ancestry=sorted(ancestry), swap=dev in swap_devs,
                 mounts=selected, foreign_mounts=[m for m in selected if m['target'] != MOUNT],
+                data_mounts=[m for m in mounts if m['target'] == MOUNT],
                 signatures=signatures)
+
+
+def mountpoint(snapshot):
+    """Read-only early check; the later Boot guard still owns guard operations."""
+    occupants = snapshot['data_mounts']
+    require(type(occupants) is list and len(occupants) <= 1,
+            'Data mountpoint backing identity is ambiguous or uninspectable')
+    if occupants:
+        require(occupants[0].get('maj:min') == snapshot['dev'],
+                'Data mountpoint is backed by the wrong device or has unknown identity')
+    require(occupants == snapshot['mounts'], 'Data mountpoint and selected-device observations disagree')
 
 
 def filesystem(snapshot, uuid):

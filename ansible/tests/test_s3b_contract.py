@@ -47,7 +47,7 @@ def snapshot():
 
 class Gates(unittest.TestCase):
     def test_stage_preflight_reuses_data_identity_and_final_filesystem_gate(self):
-        evidence = snapshot()
+        evidence = snapshot() | {'data_mounts': []}
         with patch.object(preflight, 'inspect', return_value=evidence), \
                 patch.object(preflight, 'filesystem') as filesystem:
             self.assertEqual(preflight.check(IDENTITY, SERIAL, SIZE, 512, 'bootstrap', ''), evidence)

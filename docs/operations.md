@@ -112,7 +112,10 @@ Controller HEAD must equal `mcp_source_revision`; any tracked change (including
 staged changes) fails. `run` requires those accepted hashes and reads each input
 once. It passes normalized validated Layer-2 JSON to Ansible, retaining both that
 JSON and the exact original bytes and hashes. It exports only the committed
-source into an isolated execution tree, replaces the Ansible environment/HOME,
+source into an isolated execution tree from raw commit/tree/blob objects with
+replacement semantics disabled. Local archive attributes cannot alter that
+snapshot; member set, file types/modes and blob contents are verified against
+the raw reviewed objects before DNS/SSH contact. It replaces the Ansible environment/HOME,
 and creates the effective single-host inventory itself. Untracked/ignored
 variable files and ambient `ANSIBLE_*` configuration cannot alter the invocation.
 No CLI pass-through, extra-vars escape hatch, tags, task skipping, alternate
@@ -121,6 +124,10 @@ outside the formal procedure. Syntax/list/component checks below remain local.
 
 Every mutating entry rechecks stage-specific guest Data identity before role
 mutation, then the existing runtime gates check their own consumption boundaries.
+The final preflight also checks the actual Data mountpoint's backing identity:
+an unused mountpoint is allowed, but a foreign or ambiguous occupant stops before
+S3A. This read-only check does not create the guard or perform bind mounts; the
+later S3B guard remains in place.
 Storage inspection tools must be present for the initial read-only check; absent
 or uninspectable evidence is STOP, never permission to install/repair first.
 Boot/root ancestry, topology, signatures and UUID/state remain guest-local

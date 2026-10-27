@@ -177,7 +177,7 @@ class Invocation(unittest.TestCase):
             git('add', 'source')
             with self.assertRaisesRegex(ValueError, 'dirty'):
                 DEPLOY['source_binding'](root, revision)
-            # Archive uses committed bytes even when a caller has untracked vars.
+            # Snapshot uses committed bytes even when a caller has untracked vars.
             (root / 'host_vars').mkdir()
             (root / 'host_vars/anything').write_text('override')
             snapshot = Path(temporary) / 'snapshot'

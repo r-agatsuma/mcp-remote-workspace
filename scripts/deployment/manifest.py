@@ -57,6 +57,9 @@ def parse(raw):
     try:
         source = raw.decode('utf-8')
         require(not source.startswith('\ufeff'), 'UTF-8 BOM is not accepted')
+        # Unknown directives are discarded by the parser before document events.
+        for token in yaml.scan(source, Loader=yaml.SafeLoader):
+            require(not isinstance(token, yaml.tokens.DirectiveToken), 'YAML directives are forbidden')
         documents = 0
         for event in yaml.parse(source, Loader=yaml.SafeLoader):
             require(not isinstance(event, yaml.AliasEvent), 'aliases are forbidden')

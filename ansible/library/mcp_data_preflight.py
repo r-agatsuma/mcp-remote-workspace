@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Read-only stage-specific Data evidence before any deployment mutation."""
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.mcp_data import argument_spec, filesystem, inputs, inspect, require, validate
+from ansible.module_utils.mcp_data import argument_spec, filesystem, inputs, inspect, mountpoint, require, validate
 
 
 def check(identity, serial, size, sector, stage, uuid):
@@ -9,6 +9,7 @@ def check(identity, serial, size, sector, stage, uuid):
     inputs(identity, serial, size, sector)
     evidence = validate(inspect(identity), identity, serial, size, sector, stage == 'bootstrap')
     if stage == 'final':
+        mountpoint(evidence)
         filesystem(evidence, uuid)
     else:
         require(uuid == '', 'bootstrap must not consume a final UUID')

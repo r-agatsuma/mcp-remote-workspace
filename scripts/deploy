@@ -8,7 +8,6 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -18,7 +17,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 
 sys.dont_write_bytecode = True
@@ -53,7 +51,8 @@ def read_input(path, private=False):
 
 def git(root, *args):
     env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
-    return subprocess.check_output(['git', '--no-optional-locks', '-C', str(root), *args], env=env)
+    return subprocess.check_output(['git', '--no-replace-objects', '--no-optional-locks',
+                                    '-C', str(root), *args], env=env)
 
 
 def source_binding(root, revision):
@@ -63,15 +62,65 @@ def source_binding(root, revision):
             'tracked controller source is dirty')
 
 
+def object_id(kind, content):
+    # The manifest identifies a SHA-1 Git commit; include the Git object header.
+    return hashlib.sha1(kind.encode() + b' ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+
+
+def raw_object(root, kind, oid):
+    require(match(oid, r'[0-9a-f]{40}'), 'exact Git object ID required')
+    content = git(root, 'cat-file', kind, oid)
+    require(object_id(kind, content) == oid, 'raw Git object identity mismatch')
+    return content
+
+
+def verify_snapshot(directory, expected):
+    members = {path.relative_to(directory): path for path in directory.rglob('*')}
+    require(set(members) == set(expected), 'source snapshot member set differs from raw Git tree')
+    for name, (mode, oid) in expected.items():
+        path = members[name]
+        actual_mode = path.lstat().st_mode
+        if mode == b'40000':
+            require(stat.S_ISDIR(actual_mode), 'source snapshot directory type mismatch')
+        else:
+            require(stat.S_ISREG(actual_mode) and stat.S_IMODE(actual_mode) == int(mode, 8) & 0o777,
+                    'source snapshot file type/mode mismatch')
+            require(object_id('blob', path.read_bytes()) == oid, 'source snapshot blob identity mismatch')
+
+
 def snapshot(root, revision, directory):
-    # Export only committed files. Untracked/ignored group_vars, host_vars,
-    # ansible.cfg and plugins from the user's checkout cannot enter this run.
-    archive = git(root, 'archive', '--format=tar', revision)
-    with tarfile.open(fileobj=io.BytesIO(archive)) as source:
-        for member in source.getmembers():
-            require(not Path(member.name).is_absolute() and '..' not in Path(member.name).parts
-                    and (member.isfile() or member.isdir()), 'unsupported source archive member')
-        source.extractall(directory, filter='data')
+    # Read raw objects, never archive/checkout: neither info/attributes nor
+    # export-ignore/export-subst/filters may change the reviewed tree's meaning.
+    commit = raw_object(root, 'commit', revision)
+    tree_line = commit.split(b'\n', 1)[0]
+    require(tree_line.startswith(b'tree '), 'reviewed commit has no root tree')
+    expected = {}
+
+    def materialize(tree, relative):
+        entries = raw_object(root, 'tree', tree)
+        (directory / relative).mkdir(mode=0o700)
+        while entries:
+            header, separator, remaining = entries.partition(b'\0')
+            require(separator and len(remaining) >= 20, 'malformed raw Git tree entry')
+            mode, name = header.split(b' ', 1)
+            require(mode in (b'40000', b'100644', b'100755') and name
+                    and b'/' not in name and name not in (b'.', b'..', b'.git'),
+                    'unsupported raw Git tree member')
+            oid, entries = remaining[:20].hex(), remaining[20:]
+            member = relative / os.fsdecode(name)
+            require(member not in expected, 'duplicate raw Git tree member')
+            expected[member] = (mode, oid)
+            if mode == b'40000':
+                materialize(oid, member)
+            else:
+                content = raw_object(root, 'blob', oid)
+                with (directory / member).open('xb') as output:
+                    output.write(content)
+                (directory / member).chmod(int(mode, 8) & 0o777)
+
+    materialize(tree_line[5:].decode('ascii'), Path('.'))
+    # Establish physical member/type/mode/content equality before DNS or SSH.
+    verify_snapshot(directory, expected)
 
 
 def private_write(path, raw):
