@@ -3,5 +3,10 @@
   hosts: mcp_hosts
   become: true
   gather_facts: true
+  vars:
+    mcp_deployment_stage: bootstrap
+  pre_tasks:
+    - name: Require source policy and fresh blank Data identity before mutation
+      ansible.builtin.import_tasks: tasks/deployment_preflight.yml
   roles:
     - data_bootstrap

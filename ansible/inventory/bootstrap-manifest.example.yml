@@ -1,0 +1,10 @@
+---
+# Placeholder-only schema. Create the real 0600 operator file outside Git/tmp.
+# Validate with scripts/deploy validate bootstrap; no source policy or secrets.
+mcp_source_revision: REPLACE_WITH_REVIEWED_40_LOWERCASE_HEX_COMMIT
+mcp_target_ssh_host_key_sha256: REPLACE_WITH_HUMAN_ACCEPTED_SSH_SHA256_FINGERPRINT
+mcp_data_device_id: REPLACE_WITH_WHOLE_DEVICE_STABLE_BY_ID
+mcp_data_expected_serial: REPLACE_WITH_EXACT_UDEV_ID_SERIAL
+mcp_data_expected_sector_bytes: REPLACE_WITH_OBSERVED_INTEGER_512_OR_4096
+# No UUID, subuid/subgid starts, public addresses or Tunnel ID at this stage.
+# The separate exact Human grant is required even when Data has no filesystem.

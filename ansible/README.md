@@ -12,12 +12,17 @@ user manager and checks its cgroup authority. S3D adds the root-owned persistent
 destination policy and direct trusted resolver view. S3E adds the production
 services, shared trusted recovery configuration and pinned Tunnel installation.
 
-Before a deployment, copy `inventory/hosts.example.yml` and replace its
-documentation-only address and operator account. Set `mcp_source_revision` in
-`group_vars/all.yml` to the exact 40-character commit to deploy. The example
-value intentionally fails the revision check. The repository URL, source path,
-toolchain, and account names are visible in the variables and tasks; do not set
-the revision to a branch name or tag.
+The formal mutation entry is `../scripts/deploy`, documented in the
+[operator runbook](../docs/operations.md#formal-invocation-and-target-identity).
+Source-owned policy in `group_vars/all.yml` is reviewed/versioned source. Do not
+edit it to fill in instance values. Use the placeholder-only bootstrap/final
+manifest schemas and the restricted locator schema under `inventory/`; keep real
+operator files outside Git. Controller HEAD must match the manifest's exact
+40-lowercase-hex source revision, with clean tracked source. The wrapper validates
+one deterministic YAML interpretation, rejects non-Layer-2 fields, pins SSH host
+authentication and records exact input/effective-configuration evidence. It accepts
+no arbitrary Ansible variables/options. `hosts.example.yml` remains only a static
+Ansible inventory example, not the formal mutation interface.
 
 Run from this directory with an installed Ansible controller:
 
@@ -79,19 +84,20 @@ wrong, ambiguous or exhausted Data is an operator condition; no automatic
 repair, global prune, chmod recovery or replacement filesystem is attempted.
 
 The reference is a dedicated whole disk, ext4, at `/srv/mcp-podman`. The expected
-size is an explicit byte count, not an exact workspace entitlement. Both entry
-paths require trusted per-host inputs in place of the failing example values:
+size is source-owned v0 reference policy (100 GiB), not an exact workspace
+entitlement or universal product invariant. Both entry paths require validated
+stage-specific manifests in place of the failing per-instance values:
 
 | Input | Meaning |
 | --- | --- |
 | `mcp_data_device_id` | Whole-device `/dev/disk/by-id/...` symlink; no partition suffix or volatile kernel name |
 | `mcp_data_expected_serial` | Independently supplied expected udev `ID_SERIAL` for that volume |
-| `mcp_data_expected_bytes` | Exact expected whole-device size in bytes |
 | `mcp_data_expected_sector_bytes` | Expected logical sector size, 512 or 4096 |
 | `mcp_data_uuid` | ext4 UUID reported after authorized bootstrap; ordinary convergence only |
 | `mcp_runner_subuid_start`, `mcp_runner_subgid_start` | Explicit non-overlapping host allocations, outside real host IDs |
-| `mcp_runner_subid_count` | At least 65536; default 65536 |
 
+`mcp_runner_subid_count` is source-owned reference policy; only starts are final
+manifest inputs. The sector placeholder is zero and deliberately fails closed.
 No real device identity, host address, fixed universal service UID/GID or secret
 is committed. Unexpected pre-existing subordinate-ID allocations fail rather
 than being reassigned. These are deployment inputs, not product request fields.
@@ -100,8 +106,9 @@ than being reassigned. These are deployment inputs, not product request fields.
 
 The destructive entry is **only** `bootstrap-data.yml`. It is disabled when
 `mcp_data_bootstrap_enabled` is absent or false; the enable is intentionally not
-stored in example inventory. An operator must explicitly supply a boolean true
-for that run, together with the trusted identity/serial/size/sector inputs.
+stored in example inventory. The formal wrapper supplies the existing boolean
+true only after validating the exact separate Human grant and bootstrap manifest.
+The identity/serial/sector are instance inputs; size comes from reviewed source.
 Bootstrap refuses check mode. Do not use ordinary deployment to initialize Data.
 
 Before any formatting, the module resolves the stable identity and independently
@@ -341,11 +348,11 @@ checkpoint. Independent source review is still required.
 
 S3D consumes `mcp_runner_uid` and `mcp_runner_primary_gid` from S3A, then compares
 both with `pwd.getpwnam('mcp-runner')` at planning time. It never allocates or
-reassigns identities. Supply these root/operator-owned inventory inputs:
+reassigns identities. Source policy and validated final manifest supply:
 
 | Input | Contract |
 | --- | --- |
-| `mcp_public_dns` | Ordered list of 1–3 distinct native public-routable literal IPs; no hostnames, zones, mapped IPv6 or fallback |
+| `mcp_public_dns` | Source-owned v0 Google resolver pair; the underlying validator requires distinct native public literals |
 | `mcp_host_public_ips` | Complete list of the dedicated host's public IPs, including provider NAT/floating addresses absent from NICs; 1–64 distinct public literals |
 | `mcp_production_endpoint` | Shared production endpoint mapping in `group_vars/all.yml`: `address: 127.0.0.1`, `port: 8080` for the reference deployment; address must be exactly `127.0.0.1` and port an integer in `1..65535` |
 
@@ -356,9 +363,11 @@ The planner rejects malformed mappings, other addresses and non-integer ports
 (including strings and booleans), without coercion or fallback. Python rendering
 has no independent production port default.
 
-Both example IP lists are empty and intentionally fail. No resolver is a compiled
-or example deployment default. Reconcile the host list whenever provider address
-assignments change. Actual interface addresses are additionally denied through
+Only the per-instance host-public-IP list remains empty and fails closed. The
+ordered resolver pair is source-owned v0 reference policy, not a universal
+product default. Reconcile and re-hash the final manifest whenever provider
+address assignments change; fresh provider/guest equality is a per-run gate.
+Actual interface addresses are additionally denied through
 Netfilter's `addrtype LOCAL`, independent of inventory; a resolver matching a
 listed or currently assigned host address is rejected. These lists are trusted
 deployment state, never workspace/Dockerfile input.
@@ -473,9 +482,9 @@ selected host/Podman path reads direct upstreams instead of the stub or a DHCP
 provider list. This supported external-management mode is an Ubuntu mechanism,
 not an architecture invariant. It does not reconfigure systemd-resolved's D-Bus
 clients, add a daemon, promise cache behavior or force untrusted public DNS/DoH
-exclusivity. There is no resolved.conf DNS list that could diverge from inventory.
+exclusivity. There is no resolved.conf DNS list that could diverge from source policy.
 
-`mcp_public_dns_validated` exports the normalized, validated list in operator
+`mcp_public_dns_validated` exports the normalized, validated list in source-policy
 order for later S3E repeated `-public-dns` arguments. Both it and the host file
 come from the same planner result derived from `mcp_public_dns`. S3D does not
 render daemon arguments, service/Tunnel/recovery units, provider policy or any
@@ -505,14 +514,12 @@ this Author/source checkpoint. Independent source review is a later checkpoint.
 ## S3E production services and trusted recovery
 
 S3E installs `mcp-workspaced.service` as `mcp-runner` and `mcp-tunnel.service`
-as `mcp-tunnel`. Set `mcp_canonical_image` to the canonical image's exact
-`@sha256:<64 lowercase hex>` reference and `mcp_tunnel_id` to the deployment's
-`tunnel_<32 lowercase hex>` ID. The checked-in placeholders deliberately fail.
-The operator selects the public canonical image and supplies its fully qualified
-registry/repository digest reference (include `library/` for Docker Hub official
-images). S3E converges that exact image into the final runner store before
-starting/restarting production services; manual image pre-installation is no
-longer a deployment prerequisite. S3E does not create a Tunnel object.
+as `mcp-tunnel`. `mcp_canonical_image` is the exact source-owned v0 digest pin
+in `group_vars/all.yml`; changing it requires source review, not a manifest
+override. Only `mcp_tunnel_id` is a selected per-instance manifest field.
+S3E converges the pinned public image into the final runner store before
+starting/restarting production services; manual image pre-installation is not
+a deployment prerequisite. S3E does not create a Tunnel object.
 The non-secret `mcp_production_endpoint` mapping
 supplies S3D's exact reply rule, the daemon listener and the Tunnel `main`
 channel. No second production endpoint default exists.

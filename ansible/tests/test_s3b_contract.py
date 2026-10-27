@@ -30,6 +30,7 @@ def load(name, path):
 
 data = load('ansible.module_utils.mcp_data', ROOT / 'module_utils/mcp_data.py')
 bootstrap = load('mcp_data_bootstrap_test', ROOT / 'library/mcp_data_bootstrap.py')
+preflight = load('mcp_data_preflight_test', ROOT / 'library/mcp_data_preflight.py')
 subids = load('mcp_subids_test', ROOT / 'library/mcp_subids_verify.py')
 paths_module = load('mcp_paths_test', ROOT / 'library/mcp_data_paths.py')
 IDENTITY = '/dev/disk/by-id/scsi-SYNTHETIC_DATA'
@@ -45,6 +46,26 @@ def snapshot():
 
 
 class Gates(unittest.TestCase):
+    def test_stage_preflight_reuses_data_identity_and_final_filesystem_gate(self):
+        evidence = snapshot() | {'data_mounts': []}
+        with patch.object(preflight, 'inspect', return_value=evidence), \
+                patch.object(preflight, 'filesystem') as filesystem:
+            self.assertEqual(preflight.check(IDENTITY, SERIAL, SIZE, 512, 'bootstrap', ''), evidence)
+            filesystem.assert_not_called()
+            self.assertEqual(preflight.check(IDENTITY, SERIAL, SIZE, 512, 'final', UUID), evidence)
+            filesystem.assert_called_once_with(evidence, UUID)
+        for stage, uuid in [('bootstrap', ''), ('final', UUID)]:
+            with patch.object(preflight, 'inspect', return_value=evidence | {'boot_ancestry': ['8:16']}), \
+                    self.assertRaisesRegex(ValueError, 'Boot/root'):
+                preflight.check(IDENTITY, SERIAL, SIZE, 512, stage, uuid)
+        with patch.object(preflight, 'inspect', return_value=evidence | {'signatures': [{'type': 'ext4'}]}), \
+                self.assertRaisesRegex(ValueError, 'signatures'):
+            preflight.check(IDENTITY, SERIAL, SIZE, 512, 'bootstrap', '')
+        with patch.object(preflight, 'inspect', return_value=evidence), \
+                patch.object(preflight, 'filesystem', side_effect=ValueError('UUID mismatch')), \
+                self.assertRaisesRegex(ValueError, 'UUID mismatch'):
+            preflight.check(IDENTITY, SERIAL, SIZE, 512, 'final', UUID)
+
     def validate(self, value, blank=True):
         return data.validate(value, IDENTITY, SERIAL, SIZE, 512, blank)
 

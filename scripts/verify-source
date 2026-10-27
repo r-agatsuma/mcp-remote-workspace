@@ -47,7 +47,8 @@ def verify_deployment_source():
         else:
             for play in ['site.yml', 'bootstrap-data.yml', 'tests/revision_contract.yml']:
                 run(['ansible-playbook', '-i', 'localhost,', '--syntax-check', play], ROOT / 'ansible')
-            run(['ansible-playbook', '-i', 'localhost,', '--list-tasks', 'site.yml'], ROOT / 'ansible')
+            for play in ['site.yml', 'bootstrap-data.yml']:
+                run(['ansible-playbook', '-i', 'localhost,', '--list-tasks', play], ROOT / 'ansible')
             run(['ansible-inventory', '-i', 'inventory/hosts.example.yml', '--list'], ROOT / 'ansible')
             run(['ansible-playbook', '-i', 'localhost,', 'tests/revision_contract.yml'], ROOT / 'ansible')
             sys.path.insert(0, str(ROOT / 'ansible/tests'))

@@ -3,8 +3,8 @@
 This is the operational entry point for the landed S3 deployment. The detailed
 [source contracts](../ansible/README.md), [ingress](ingress.md),
 [lifecycle](lifecycle.md), [admission](admission.md) and [recovery](recovery.md)
-explain its boundaries. Issue #113 owns consolidation, not new production
-behavior. Commands below are procedures for a separately authorized operator;
+explain its boundaries. Commands below are procedures for a separately
+authorized operator;
 source review does not authorize executing them on a host.
 
 ## Evidence and execution gates
@@ -21,68 +21,231 @@ No source result is real systemd, Podman/Buildah, Netfilter, DNS, cgroup, OCI,
 credential-behavior, Tunnel READY or ChatGPT E2E PASS. Ansible `--check` still
 connects to hosts; it is not a substitute for local source checks.
 
-## Prerequisites and trusted inputs
+## Three deployment authorities and controller prerequisites
 
-Use the dedicated Ubuntu 24.04 arm64 target and a trusted Ansible controller.
-The operator must have existing host administration authority; neither service
-account gains sudo or an interactive shell. Use a reviewed repository revision.
-Keep host-specific inputs outside Git. All variable names in the shell examples
-are placeholders for explicitly selected local paths or inspection selections;
-never substitute a credential into a command.
+The supported procedure is:
 
-Record the exact source/deployment commit, target platform, package provenance,
-and non-secret input revision in the authorized deployment record. Supply a
-private inventory based on `ansible/inventory/hosts.example.yml` and a non-secret
-variables file with these inputs (see `ansible/group_vars/all.yml`):
+```text
+reviewed source-owned policy
++ validated stage-appropriate operator manifest
++ separately staged secret where applicable
+        -> scripts/deploy formal invocation
+```
 
-| Input | Required meaning |
-| --- | --- |
-| `mcp_source_revision` | Exact 40-hex reviewed application commit, never a branch or tag |
-| `mcp_data_device_id`, `mcp_data_expected_serial` | Independently verified whole-device stable by-id identity and udev serial |
-| `mcp_data_expected_bytes`, `mcp_data_expected_sector_bytes` | Exact independently verified geometry |
-| `mcp_data_uuid` | UUID from separately authorized initial bootstrap, checked on ordinary convergence |
-| `mcp_runner_subuid_start`, `mcp_runner_subgid_start`, `mcp_runner_subid_count` | Explicit non-overlapping subordinate allocations |
-| `mcp_public_dns` | Ordered one-to-three trusted public literal resolvers; no built-in production list |
-| `mcp_host_public_ips` | All public host addresses, including provider NAT/floating addresses |
-| `mcp_canonical_image` | Operator-selected public, fully qualified registry/repository `@sha256:<64 lowercase hex>` reference; Ansible provisions it |
-| `mcp_tunnel_id` | Operator-provisioned Tunnel identifier; separate from the key |
-| `mcp_production_endpoint` | Fixed `127.0.0.1` and selected port; one source for firewall, listener and Tunnel |
+Use a trusted controller with Python 3.12 or newer, the existing Ansible/PyYAML
+controller dependencies, Git, OpenSSH and an authorized SSH authentication
+agent. The controller need not be a Mac; macOS is not architecture. Neither
+service account gains sudo or interactive login. The selected management account
+must already have the authorized noninteractive become access required by the
+playbooks. No password/private-key/credential file is a wrapper input.
 
-The operator selects and configures the exact canonical digest; `site.yml` owns
-its convergence into the final `mcp-runner` rootless store before production
-service activation. Include the explicit repository namespace (`library/` for
-Docker Hub official images); ambiguous short names are rejected. Manual image
-pre-installation is not required. The daemon consumes the provisioned image
-with `--pull=never`; presence at application execution time remains required.
-Ansible does not create a Tunnel object or migrate generations between images.
-If these trusted inputs are unavailable, STOP and return to the responsible
-provisioning task.
-Kernel/runtime, native overlay, NSS and existing firewall prerequisites are
-checked by the landed roles; conflicts are STOP, not permission to replace
-unrelated policy. Keep the complete shared `mcp_workspaced_config` mapping from
-source; do not construct alternate daemon or recovery flags.
+Layer 1 is the reviewed repository. `ansible/group_vars/all.yml` owns the v0
+reference size (100 GiB), subordinate range length, Google resolver pair and
+exact canonical image digest, together with the endpoint, paths, storage,
+service topology, toolchain/runtime/package, resource/TTL/backend-operation and
+Tunnel artifact policy. These are reference-deployment choices, not universal
+product invariants. Change them only through a reviewed source revision.
+
+Layer 2 is operator-controlled, non-secret, per-deployment state. Keep each real
+manifest as a durable regular mode `0600` file outside every public checkout and
+outside `/tmp`. Do not put infrastructure identities into Git. The public
+[bootstrap schema](../ansible/inventory/bootstrap-manifest.example.yml) and
+[final schema](../ansible/inventory/deployment-manifest.example.yml) contain
+placeholders only. The wrapper enforces the exact stage-specific key sets:
+
+| Input | Bootstrap | Final |
+| --- | --- | --- |
+| `mcp_source_revision` (40 lowercase hex) | Required | Required |
+| `mcp_target_ssh_host_key_sha256` (canonical unpadded OpenSSH SHA256 fingerprint) | Required | Required |
+| `mcp_data_device_id`, `mcp_data_expected_serial` | Selected whole-device stable by-id and exact udev serial | Same identities, freshly checked |
+| `mcp_data_expected_sector_bytes` (integer 512 or 4096) | Required observation, no effective default | Required observation |
+| `mcp_data_uuid` | Forbidden | Independently verified ext4 UUID |
+| `mcp_runner_subuid_start`, `mcp_runner_subgid_start` | Forbidden | Positive, host-verified allocations |
+| `mcp_host_public_ips` | Forbidden | Complete current native literal public address list |
+| `mcp_tunnel_id` | Forbidden | Selected `tunnel_<32 lowercase hex>` |
+
+Layer 3 is only the independently staged runtime secret described below. The
+manifest cannot contain API-key/credential fields, source-policy duplicates,
+bootstrap enable, nested policy, alternate vars files or unknown keys.
+
+Manifest and locator YAML must be UTF-8, exactly one document and one top-level
+mapping. Duplicate keys at every depth, merge keys, anchors, aliases, explicit
+or custom tags, directives, malformed YAML and template expressions are rejected
+unconditionally. Only strings, canonical unsigned decimal integers, lists and
+string-key mappings are interpreted; quote strings which YAML would otherwise
+interpret as numbers, booleans or timestamps. This narrow schema deliberately
+rejects alternate numeric spellings, timestamps and parser fallback. Input is
+bounded to 64 KiB. A hash is reported only after deterministic interpretation,
+schema validation and source binding succeed.
+
+## Formal invocation and target identity
+
+Create a separate private locator file from
+[`locator.example.yml`](../ansible/inventory/locator.example.yml), containing
+exactly `host`, integer `port` and `user`. It is not a general Ansible inventory.
+SSH config aliases/options, vars plugins, inventory scripts and adjacent
+`host_vars`/`group_vars` are not consumed. Resolve any SSH-config alias into an
+explicit DNS/IP locator and account here. The locator must resolve to exactly
+one address for the invocation; ambiguity requires operator re-selection.
+
+SSH config / DNS / resolved IP is a **locator**, not identity authority. Human
+must accept the expected host-key fingerprint through the authorized selection
+process before creating the manifest. `ssh-keyscan` retrieves an untrusted public
+key; only a key whose SHA256 equals that accepted fingerprint is used. The
+wrapper then authenticates an SSH connection with strict checking, an isolated
+known-hosts file, no global/user SSH config, no DNS host-key authority, no
+connection reuse and no automatic key update. It never accepts unattended TOFU.
+Mismatch is STOP / Human re-selection, even if the locator stayed unchanged.
+A new clean host needs a new accepted fingerprint and new lifecycle artifacts.
+
+From the exact reviewed, clean controller checkout, perform local-only validation:
+
+```sh
+./scripts/deploy validate bootstrap --manifest "$BOOTSTRAP_MANIFEST" --inventory "$LOCATOR"
+./scripts/deploy validate final --manifest "$FINAL_MANIFEST" --inventory "$LOCATOR"
+```
+
+These are separate stage examples, not a sequence that requires a final manifest
+before bootstrap. Record the returned stage, source revision, exact manifest
+SHA256 and exact locator-input SHA256 in restricted deployment evidence.
+Controller HEAD must equal `mcp_source_revision`; any tracked change (including
+staged changes) fails. `run` requires those accepted hashes and reads each input
+once. It passes normalized validated Layer-2 JSON to Ansible, retaining both that
+JSON and the exact original bytes and hashes. It exports only the committed
+source into an isolated execution tree from raw commit/tree/blob objects with
+replacement semantics disabled. Local archive attributes cannot alter that
+snapshot; member set, file types/modes and blob contents are verified against
+the raw reviewed objects before DNS/SSH contact. It replaces the Ansible environment/HOME,
+and creates the effective single-host inventory itself. Untracked/ignored
+variable files and ambient `ANSIBLE_*` configuration cannot alter the invocation.
+No CLI pass-through, extra-vars escape hatch, tags, task skipping, alternate
+playbook or alternate vars file is supported. Raw `ansible-playbook` mutation is
+outside the formal procedure. Syntax/list/component checks below remain local.
+
+Every mutating entry rechecks stage-specific guest Data identity before role
+mutation, then the existing runtime gates check their own consumption boundaries.
+The final preflight also checks the actual Data mountpoint's backing identity:
+an unused mountpoint is allowed, but a foreign or ambiguous occupant stops before
+S3A. This read-only check does not create the guard or perform bind mounts; the
+later S3B guard remains in place.
+Storage inspection tools must be present for the initial read-only check; absent
+or uninspectable evidence is STOP, never permission to install/repair first.
+Boot/root ancestry, topology, signatures and UUID/state remain guest-local
+identity authority. Provider object IDs are not universal deployment identity.
+No provider discovery or object selection occurs in the wrapper.
+
+Use a new restricted evidence directory outside Git for each run. It contains
+input snapshots, effective inventory, accepted public host key binding, resolved
+locator observation, validated Layer-2 JSON, Ansible output and exit status.
+Bootstrap output records the exact rendered bootstrap configuration and its
+SHA256; final output records SHA256 for every explicit non-secret rendered
+configuration file and an ordered aggregate before service activation. Guest
+Data evidence and its SHA256 are also recorded. Configuration hashing never
+walks secret directories or includes the key path. Preserve partial/failed output
+as partial evidence. Only sanitized hashes/counts/provenance belong in public
+Issues; the original identities and rendered configuration remain restricted.
+All `run` input files (manifest, locator and grant/observation record) must be
+operator-owned regular files with mode `0600` outside the controller checkout;
+symlinks are rejected. Keep these durable records outside temporary storage.
 
 ## First provision: separately authorized destructive Data bootstrap
 
-This is a distinct, default-disabled operation, not a deployment retry or a
-recovery procedure. Confirm Human authorization for the specific blank Data
-volume and independently verify its stable identity, serial, size and sector
-size. Never use a bare volatile device name as destructive authority. Boot/root
-ancestry, existing signatures, mounted/active dependencies, identity mismatch,
-or ambiguous observations require STOP.
+The lifecycle is explicitly:
 
-Only in that separately authorized first-provision task, from `ansible/`:
-
-```sh
-ansible-playbook -i "$INVENTORY_PATH" bootstrap-data.yml \
-  -e "@$NONSECRET_INPUTS_PATH" -e '{"mcp_data_bootstrap_enabled": true}'
+```text
+bootstrap manifest -> validate/hash -> exact Human destructive grant
+-> bootstrap-data.yml -> generated UUID -> independent UUID verification
+-> Human/operator records UUID -> complete final manifest
+-> validate/hash final manifest -> ordinary site.yml
 ```
 
-Do not persist the enable in inventory. This path checks the device and issues
-one ext4 format with 10% root reserve; it does not mount or start services.
-Record the returned UUID as `mcp_data_uuid` for normal convergence. A failed or
-partially completed format is STOP; do not retry blindly, erase signatures or
-reformat. Check mode is refused. No actual bootstrap was performed as S3F evidence.
+Bootstrap is a distinct, default-disabled operation, never a deployment retry or
+recovery procedure. Confirm Human authorization for the exact selected blank
+Data volume, its pinned host key, by-id, serial and geometry. The reference size
+comes from source. Absence of a UUID does not authorize formatting. Bootstrap
+does not require final public addresses, Tunnel ID or subordinate-ID state.
+Provider evidence is required only if needed externally to disambiguate the
+selected destructive target; an ambiguous provider/guest attribution is STOP.
+Do not invent an additional bootstrap public-address field or equality gate.
+
+The Human-issued grant is a separate non-secret YAML file with exactly:
+
+```yaml
+authorize: format-blank-data
+source_revision: REPLACE_WITH_MANIFEST_SOURCE_REVISION
+manifest_sha256: REPLACE_WITH_ACCEPTED_BOOTSTRAP_MANIFEST_HASH
+inventory_sha256: REPLACE_WITH_ACCEPTED_LOCATOR_HASH
+host_key_sha256: REPLACE_WITH_ACCEPTED_MANIFEST_HOST_KEY
+data_device_id: REPLACE_WITH_EXACT_SELECTED_MANIFEST_DEVICE
+```
+
+This must record an actual Human grant, not an agent-generated authorization.
+Only after obtaining it, under the separate host-operation authorization:
+
+```sh
+./scripts/deploy run bootstrap --manifest "$BOOTSTRAP_MANIFEST" --inventory "$LOCATOR" \
+  --manifest-sha256 "$BOOTSTRAP_SHA256" --inventory-sha256 "$LOCATOR_SHA256" \
+  --bootstrap-grant "$HUMAN_GRANT" --evidence-dir "$NEW_BOOTSTRAP_EVIDENCE"
+```
+
+The wrapper requires exact grant/candidate/target equality and supplies only the
+existing boolean destructive enable in addition to validated Layer-2 values.
+The existing bootstrap verifier rechecks blank inactive whole-disk identity and
+performs one ext4 format with 10% root reserve. It does not mount or start
+services. Independently verify the generated UUID on the authenticated host's
+selected device; Human/operator then records it in a **new final manifest** and
+completes the remaining instance inputs. Different manifest bytes produce a new
+SHA256. Failure, partial completion, missing/ambiguous UUID output or unknown
+outcome is STOP for fresh read-only investigation, never automatic retry, repair,
+signature erasure or reformat. Check mode is refused.
+
+## Final-stage consumption-time freshness and dirty-target handoff
+
+Before **every** ordinary invocation, including a rerun after credential staging:
+
+1. Freshly observe the complete provider-side public/NAT/floating address set
+   that the guest cannot authoritatively observe.
+2. Obtain the guest-visible global address set; join the provider observation
+   unambiguously to the host authenticated by the accepted SSH key. Keep enough
+   private provenance (e.g. private-IP/VNIC relationship) to prove that join.
+3. Require exact set equality with `mcp_host_public_ips`. Missing, stale,
+   incomplete, ambiguous or discrepant evidence is STOP / Human revalidation.
+
+The operator/#151/#95/#96 execution procedure owns these observations. The wrapper
+neither queries OCI nor verifies the truth of external evidence. It requires a
+restricted observation record and, after strict SSH authentication, a live
+operator confirmation that the observations/attribution remain fresh at this
+consumption. A historic acceptance or timestamp alone is insufficient. No
+universal evidence TTL is invented; the responsible operator must STOP if
+freshness is uncertain. Noninteractive final mutation is unsupported.
+
+The final observation YAML contains exactly:
+
+```yaml
+manifest_sha256: REPLACE_WITH_ACCEPTED_FINAL_MANIFEST_HASH
+inventory_sha256: REPLACE_WITH_ACCEPTED_LOCATOR_HASH
+host_key_sha256: REPLACE_WITH_ACCEPTED_MANIFEST_HOST_KEY
+observed_at: 'REPLACE_WITH_UTC_YYYY_MM_DDTHH_MM_SSZ'
+public_ips:
+  - REPLACE_WITH_COMPLETE_OBSERVED_NATIVE_LITERAL_ADDRESS_SET
+provider_evidence_sha256: REPLACE_WITH_RESTRICTED_PROVIDER_OBSERVATION_HASH
+guest_evidence_sha256: REPLACE_WITH_RESTRICTED_GUEST_OBSERVATION_HASH
+```
+
+Hash only the non-secret observation records, never credential contents. The
+wrapper enforces candidate binding and exact address-set equality, retains this
+record/hash, and asks the operator to enter its SHA256 to confirm current
+freshness/attribution. A locator/IP change may still authenticate the same host,
+but changed effective public addresses invalidate the old final candidate:
+STOP -> Human/operator updates/revalidates manifest -> new hash -> new attempt.
+
+For the existing dirty target, only re-observe/freeze the exact Layer-2 inputs,
+construct the final manifest, validate and hash it, then hand off to later #95.
+#151 freeze waits for reviewed/landed #152; this source change does not freeze a
+real manifest. #95 remains blocked until both P1-A and P1-B and its other entry
+conditions are satisfied. This runbook does not design or execute P1-A cleanup.
+#96 constructs new clean bootstrap/final manifests, never reuses the dirty
+candidate identity. No #95/#96 execution is authorized by source validation.
 
 ## Human staging of the Tunnel runtime key
 
@@ -121,10 +284,13 @@ consumes `file:/etc/mcp-tunnel/control-plane-api-key` in the non-secret
 ## Normal non-destructive convergence
 
 Run source verification first on the selected controller checkout. Then, only
-under the separate host-operation authorization, from `ansible/`:
+under the separate host-operation authorization and the fresh final-stage
+observation gate above, from the reviewed repository root:
 
 ```sh
-ansible-playbook -i "$INVENTORY_PATH" site.yml -e "@$NONSECRET_INPUTS_PATH"
+./scripts/deploy run final --manifest "$FINAL_MANIFEST" --inventory "$LOCATOR" \
+  --manifest-sha256 "$FINAL_SHA256" --inventory-sha256 "$LOCATOR_SHA256" \
+  --final-observation "$FRESH_FINAL_OBSERVATION" --evidence-dir "$NEW_FINAL_EVIDENCE"
 ```
 
 The fixed sequence is S3A application/identities, S3B verified Data/runtime,
@@ -291,9 +457,10 @@ drift requires Human/coordinator disposition.
 For an application/deployment upgrade, review the exact repository change and
 source checks, record old/new commits and non-secret inputs, plan the outage,
 stop Tunnel then daemon, and confirm compatibility with existing durable state
-and canonical image. Set `mcp_source_revision` to the exact accepted commit and
-run ordinary convergence from the reviewed deployment checkout. Observe local
-startup again. No implicit journal migration or canonical-image switch is
+and canonical image. Set `mcp_source_revision` in the final manifest to the exact
+accepted commit, validate/re-hash the candidate, refresh final-stage observations
+and run the formal ordinary entry from the matching clean reviewed deployment
+checkout. Observe local startup again. No implicit journal migration or canonical-image switch is
 supported. Existing generations referring to another canonical image fail closed.
 
 Tunnel upgrades are explicit repository changes: update the pinned release,

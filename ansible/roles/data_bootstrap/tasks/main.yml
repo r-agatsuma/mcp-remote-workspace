@@ -9,6 +9,21 @@
       - not ansible_check_mode
     fail_msg: 'STOP: bootstrap is disabled unless explicitly enabled; check mode is not provisioning.'
 
+- name: Render the exact non-secret bootstrap configuration for restricted evidence
+  ansible.builtin.set_fact:
+    mcp_bootstrap_configuration:
+      identity: "{{ mcp_data_device_id }}"
+      serial: "{{ mcp_data_expected_serial }}"
+      size: "{{ mcp_data_expected_bytes }}"
+      sector: "{{ mcp_data_expected_sector_bytes }}"
+      enabled: "{{ mcp_data_bootstrap_enabled }}"
+
+- name: Record the exact bootstrap configuration hash before mutation
+  ansible.builtin.debug:
+    msg:
+      bootstrap_configuration: "{{ mcp_bootstrap_configuration }}"
+      rendered_configuration_sha256: "{{ mcp_bootstrap_configuration | to_json | hash('sha256') }}"
+
 - name: Install the distribution storage prerequisites after explicit enable
   ansible.builtin.import_tasks: ../../../tasks/storage_prerequisites.yml
 

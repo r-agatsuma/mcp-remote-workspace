@@ -1,0 +1,47 @@
+---
+# Exact non-secret configuration paths only. Never traverse the Tunnel directory
+# or include /etc/mcp-tunnel/control-plane-api-key in content/hash operations.
+- name: Hash the exact rendered non-secret deployment files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+    get_mime: false
+    get_attributes: false
+  loop:
+    - /usr/local/lib/mcp-workspaced/data-verify
+    - /etc/systemd/system/mcp-data-verify.service
+    - '/etc/systemd/system/srv-mcp\x2dpodman.mount'
+    - /etc/systemd/system/mcp-data-ready.service
+    - /srv/mcp-podman/runner/.config/containers/storage.conf
+    - /srv/mcp-podman/runner/.config/containers/containers.conf
+    - /srv/mcp-podman/runner/.config/environment.d/10-mcp-runtime.conf
+    - /etc/default/netfilter-persistent
+    - /etc/iptables/rules.v4
+    - /etc/iptables/rules.v6
+    - /etc/sysctl.d/99-mcp-network.conf
+    - /etc/resolv.conf
+    - /usr/local/lib/mcp-workspaced/service-prerequisites
+    - /usr/local/lib/mcp-workspaced/canonical-image
+    - /usr/local/lib/mcp-workspaced/recover
+    - /usr/local/lib/mcp-tunnel/preflight
+    - /etc/systemd/system/mcp-workspaced.service
+    - /etc/systemd/system/mcp-tunnel.service
+    - /etc/mcp-tunnel/tunnel.yaml
+  register: mcp_rendered_configuration
+
+- name: Require all rendered configuration evidence before activation
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.checksum is defined
+    fail_msg: 'STOP: rendered non-secret configuration evidence is incomplete.'
+  loop: "{{ mcp_rendered_configuration.results }}"
+
+- name: Retain rendered file hashes and their ordered aggregate in restricted evidence
+  ansible.builtin.debug:
+    msg:
+      files: "{{ mcp_rendered_configuration.results }}"
+      rendered_configuration_sha256: "{{ mcp_rendered_configuration.results | map(attribute='stat.checksum') | list | to_json | hash('sha256') }}"
