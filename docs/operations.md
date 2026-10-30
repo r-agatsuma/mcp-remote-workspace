@@ -61,7 +61,6 @@ placeholders only. The wrapper enforces the exact stage-specific key sets:
 | `mcp_data_expected_sector_bytes` (integer 512 or 4096) | Required observation, no effective default | Required observation |
 | `mcp_data_uuid` | Forbidden | Independently verified ext4 UUID |
 | `mcp_runner_subuid_start`, `mcp_runner_subgid_start` | Forbidden | Positive, host-verified allocations |
-| `mcp_host_public_ips` | Forbidden | Complete current native literal public address list |
 | `mcp_tunnel_id` | Forbidden | Selected `tunnel_<32 lowercase hex>` |
 
 Layer 3 is only the independently staged runtime secret described below. The
@@ -82,11 +81,14 @@ schema validation and source binding succeed.
 
 Create a separate private locator file from
 [`locator.example.yml`](../ansible/inventory/locator.example.yml), containing
-exactly `host`, integer `port` and `user`. It is not a general Ansible inventory.
+exactly `host`, integer `port` and `user` for bootstrap. For final, remove `host`:
+only integer `port` and `user` are accepted; the provider record supplies the
+SSH public IPv4. It is not a general Ansible inventory.
 SSH config aliases/options, vars plugins, inventory scripts and adjacent
 `host_vars`/`group_vars` are not consumed. Resolve any SSH-config alias into an
-explicit DNS/IP locator and account here. The locator must resolve to exactly
-one address for the invocation; ambiguity requires operator re-selection.
+explicit DNS/IP locator and account for bootstrap. That locator must resolve to
+exactly one address for the invocation; ambiguity requires operator re-selection.
+Final does not resolve a DNS locator.
 
 SSH config / DNS / resolved IP is a **locator**, not identity authority. Human
 must accept the expected host-key fingerprint through the authorized selection
@@ -102,17 +104,18 @@ From the exact reviewed, clean controller checkout, perform local-only validatio
 
 ```sh
 ./scripts/deploy validate bootstrap --manifest "$BOOTSTRAP_MANIFEST" --inventory "$LOCATOR"
-./scripts/deploy validate final --manifest "$FINAL_MANIFEST" --inventory "$LOCATOR"
+./scripts/deploy validate final --manifest "$FINAL_MANIFEST" --inventory "$FINAL_LOCATOR"
 ```
 
 These are separate stage examples, not a sequence that requires a final manifest
 before bootstrap. Record the returned stage, source revision, exact manifest
 SHA256 and exact locator-input SHA256 in restricted deployment evidence.
 Controller HEAD must equal `mcp_source_revision`; any tracked change (including
-staged changes) fails. `run` requires those accepted hashes and reads each input
-once. It passes normalized validated Layer-2 JSON to Ansible, retaining both that
-JSON and the exact original bytes and hashes. It exports only the committed
-source into an isolated execution tree from raw commit/tree/blob objects with
+staged changes) fails. Bootstrap `run` requires those accepted hashes. Final
+`run` accepts them optionally and checks any supplied hash against the consumed
+bytes. Each input is read once. It passes normalized validated Layer-2 JSON
+to Ansible, retaining both that JSON and the exact original bytes and hashes.
+It exports only the committed source into an isolated execution tree from raw commit/tree/blob objects with
 replacement semantics disabled. Local archive attributes cannot alter that
 snapshot; member set, file types/modes and blob contents are verified against
 the raw reviewed objects before DNS/SSH contact. It replaces the Ansible environment/HOME,
@@ -144,7 +147,7 @@ Data evidence and its SHA256 are also recorded. Configuration hashing never
 walks secret directories or includes the key path. Preserve partial/failed output
 as partial evidence. Only sanitized hashes/counts/provenance belong in public
 Issues; the original identities and rendered configuration remain restricted.
-All `run` input files (manifest, locator and grant/observation record) must be
+All `run` input files (manifest, locator and grant/provider record) must be
 operator-owned regular files with mode `0600` outside the controller checkout;
 symlinks are rejected. Keep these durable records outside temporary storage.
 
@@ -156,7 +159,7 @@ The lifecycle is explicitly:
 bootstrap manifest -> validate/hash -> exact Human destructive grant
 -> bootstrap-data.yml -> generated UUID -> independent UUID verification
 -> Human/operator records UUID -> complete final manifest
--> validate/hash final manifest -> ordinary site.yml
+-> validate final manifest -> provider record/guest join/confirmation -> ordinary site.yml
 ```
 
 Bootstrap is a distinct, default-disabled operation, never a deployment retry or
@@ -199,53 +202,92 @@ SHA256. Failure, partial completion, missing/ambiguous UUID output or unknown
 outcome is STOP for fresh read-only investigation, never automatic retry, repair,
 signature erasure or reformat. Check mode is refused.
 
-## Final-stage consumption-time freshness and dirty-target handoff
+## Final-stage Cloud Shell observation and guest join
 
-Before **every** ordinary invocation, including a rerun after credential staging:
+Before every final invocation, use the selected instance's existing OCI Cloud
+Shell console session. Do not install OCI credentials or an OCI CLI on the
+controller. The helper uses only the console CLI's default authentication and
+six read-only calls; each list uses `--all`. It requires one RUNNING instance,
+one ATTACHED VNIC attachment, an AVAILABLE VNIC, one primary RFC 1918 private
+IPv4, its bound public IPv4 and one AVAILABLE public GUA IPv6. Unexpected state,
+multiplicity, missing data or CLI failure emits `OBSERVE STOP` and no record.
+These source checks and synthetic tests are not provider/runtime evidence.
 
-1. Freshly observe the complete provider-side public/NAT/floating address set
-   that the guest cannot authoritatively observe.
-2. Obtain the guest-visible global address set; join the provider observation
-   unambiguously to the host authenticated by the accepted SSH key. Keep enough
-   private provenance (e.g. private-IP/VNIC relationship) to prove that join.
-3. Require exact set equality with `mcp_host_public_ips`. Missing, stale,
-   incomplete, ambiguous or discrepant evidence is STOP / Human revalidation.
+1. On the reviewed controller checkout, obtain the exact reviewed source SHA and
+   SHA-256 identities for the helper and its repository-local, standard-library
+   public-address predicate. Transfer these **non-secret source identities** to
+   Cloud Shell through the approved channel; do not derive trust from downloaded
+   code alone:
 
-The operator/#151/#95/#96 execution procedure owns these observations. The wrapper
-neither queries OCI nor verifies the truth of external evidence. It requires a
-restricted observation record and, after strict SSH authentication, a live
-operator confirmation that the observations/attribution remain fresh at this
-consumption. A historic acceptance or timestamp alone is insufficient. No
-universal evidence TTL is invented; the responsible operator must STOP if
-freshness is uncertain. Noninteractive final mutation is unsupported.
+   ```sh
+   git rev-parse HEAD
+   sha256sum scripts/oci-observe ansible/module_utils/mcp_network.py
+   ```
 
-The final observation YAML contains exactly:
+   In Cloud Shell, obtain the source at that exact SHA (the variables below are
+   those reviewed identities, not a branch tip):
 
-```yaml
-manifest_sha256: REPLACE_WITH_ACCEPTED_FINAL_MANIFEST_HASH
-inventory_sha256: REPLACE_WITH_ACCEPTED_LOCATOR_HASH
-host_key_sha256: REPLACE_WITH_ACCEPTED_MANIFEST_HOST_KEY
-observed_at: 'REPLACE_WITH_UTC_YYYY_MM_DDTHH_MM_SSZ'
-public_ips:
-  - REPLACE_WITH_COMPLETE_OBSERVED_NATIVE_LITERAL_ADDRESS_SET
-provider_evidence_sha256: REPLACE_WITH_RESTRICTED_PROVIDER_OBSERVATION_HASH
-guest_evidence_sha256: REPLACE_WITH_RESTRICTED_GUEST_OBSERVATION_HASH
-```
+   ```sh
+   git clone --no-checkout https://github.com/r-agatsuma/mcp-remote-workspace.git "$OBSERVE_SOURCE"
+   git -C "$OBSERVE_SOURCE" checkout --detach "$REVIEWED_SHA"
+   cd "$OBSERVE_SOURCE"
+   test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
+   printf '%s  scripts/oci-observe\n%s  ansible/module_utils/mcp_network.py\n' \
+     "$REVIEWED_HELPER_SHA256" "$REVIEWED_NETWORK_SHA256" | sha256sum --check --strict -
+   ```
 
-Hash only the non-secret observation records, never credential contents. The
-wrapper enforces candidate binding and exact address-set equality, retains this
-record/hash, and asks the operator to enter its SHA256 to confirm current
-freshness/attribution. A locator/IP change may still authenticate the same host,
-but changed effective public addresses invalidate the old final candidate:
-STOP -> Human/operator updates/revalidates manifest -> new hash -> new attempt.
+   Stop on any mismatch; run the helper only after these checks pass. The helper
+   must stay in this source tree so it can import the pure predicate. It requires
+   Python 3's standard library only, with no controller/Ansible dependencies.
+2. Still in Cloud Shell, run it for the explicitly selected instance:
 
-For the existing dirty target, only re-observe/freeze the exact Layer-2 inputs,
-construct the final manifest, validate and hash it, then hand off to later #95.
-#151 freeze waits for reviewed/landed #152; this source change does not freeze a
-real manifest. #95 remains blocked until both P1-A and P1-B and its other entry
-conditions are satisfied. This runbook does not design or execute P1-A cleanup.
-#96 constructs new clean bootstrap/final manifests, never reuses the dirty
-candidate identity. No #95/#96 execution is authorized by source validation.
+   ```sh
+   ./scripts/oci-observe "$INSTANCE_OCID"
+   ```
+
+   A successful stdout is exactly one canonical provider-record v1 JSON object.
+   A failure is STOP, never permission to select another instance or add credentials.
+3. Relay that exact successful stdout, including its trailing LF, to a durable
+   private **0600** regular file `$PROVIDER_RECORD` on the controller, outside
+   every checkout and temporary storage. Use an approved private channel; the
+   OCID and addresses must not enter Git, public Issues or diagnostic bundles.
+   The parser rejects unknown/missing keys, duplicate keys, non-UTF-8, BOMs,
+   inputs over 64 KiB, invalid addresses/counts/lifecycles and future UTC times.
+   No signature or universal TTL is claimed.
+4. From the clean reviewed controller checkout, with a final locator containing
+   only `port` and `user`, run:
+
+   ```sh
+   ./scripts/deploy run final --manifest "$FINAL_MANIFEST" --inventory "$FINAL_LOCATOR" \
+     --provider-record "$PROVIDER_RECORD" --evidence-dir "$NEW_FINAL_EVIDENCE"
+   ```
+
+   The wrapper connects directly to the record's public IPv4, matches the
+   accepted SSH fingerprint and proves possession with `/usr/bin/true`. Over
+   those same pinned options it runs the read-only command
+   `/usr/sbin/ip -j addr show scope global`. Across all non-loopback interfaces,
+   the global IPv4 set must equal the record's primary private IPv4 singleton,
+   and the global IPv6 set its GUA singleton. Any extra/missing address,
+   malformed JSON or command failure stops before Ansible mutation.
+5. Read the record facts, matched SSH fingerprint and guest-join result shown
+   by the interactive tty prompt. In the OCI console, for the VNIC of **this same
+   instance**, check **every Security List of its subnet and every NSG attached
+   to the VNIC**: there must be no ingress rule admitting TCP (protocol TCP or
+   All) from an IPv6 source. Only after this console check, answer exactly `y`.
+   Every other answer, EOF or non-tty stdin stops before mutation. Stop if the
+   record or attribution is no longer current; timestamps/hashes do not grant authority.
+
+The manifest forbids address inputs. The entry alone injects `mcp_host_public_ipv4`
+and `mcp_host_gua_ipv6` into Ansible after the join/confirmation. Private evidence
+adds the exact consumed `provider-record.json`, exact guest response
+`guest-join.json`, and `confirmation.json` (answer and UTC time). `binding.json`
+contains `provider_record_sha256` and `guest_join_sha256` as audit identities of
+those bytes, not authority. The OCID appears only in private evidence and the
+local confirmation display; it is not passed to Ansible.
+
+No target/provider/Cloud Shell execution or deployment is authorized by source
+validation. Runtime proof belongs to #95 (I1) and #190 (I2); each requires its own
+execution contract and authorization.
 
 ## Human staging of the Tunnel runtime key
 
@@ -261,10 +303,13 @@ never prints or transports its contents:
 | `/etc/mcp-tunnel` | Real directory, not a symlink | `root:mcp-tunnel` | `0750` |
 | `/etc/mcp-tunnel/control-plane-api-key` | Regular file, not a symlink | `mcp-tunnel:mcp-tunnel` | `0600` |
 
-On initial convergence the metadata gate may stop after the directory/accounts
-exist. Complete authorized Human staging, then rerun ordinary convergence. Wrong
-existing state must be investigated through that staging process; do not use
-blind permission repair or read the key to diagnose it. Verify metadata without
+The v0 credential order is: confirm `/etc/mcp-tunnel` is a real directory
+`root:mcp-tunnel 0750` → the Human stages the new credential → first final entry
+→ same-entry reapply (with a new observation and evidence directory). If the
+directory/account prerequisite is absent, STOP for the separately authorized
+prerequisite work; do not use a failed first entry to establish the staging
+order. Wrong existing state must be investigated through that staging process;
+do not use blind permission repair or read the key to diagnose it. Verify metadata without
 following links or opening contents:
 
 ```sh
@@ -284,13 +329,12 @@ consumes `file:/etc/mcp-tunnel/control-plane-api-key` in the non-secret
 ## Normal non-destructive convergence
 
 Run source verification first on the selected controller checkout. Then, only
-under the separate host-operation authorization and the fresh final-stage
-observation gate above, from the reviewed repository root:
+under the separate host-operation authorization and the provider/guest/console
+confirmation gate above, from the reviewed repository root:
 
 ```sh
-./scripts/deploy run final --manifest "$FINAL_MANIFEST" --inventory "$LOCATOR" \
-  --manifest-sha256 "$FINAL_SHA256" --inventory-sha256 "$LOCATOR_SHA256" \
-  --final-observation "$FRESH_FINAL_OBSERVATION" --evidence-dir "$NEW_FINAL_EVIDENCE"
+./scripts/deploy run final --manifest "$FINAL_MANIFEST" --inventory "$FINAL_LOCATOR" \
+  --provider-record "$PROVIDER_RECORD" --evidence-dir "$NEW_FINAL_EVIDENCE"
 ```
 
 The fixed sequence is S3A application/identities, S3B verified Data/runtime,
@@ -458,8 +502,11 @@ For an application/deployment upgrade, review the exact repository change and
 source checks, record old/new commits and non-secret inputs, plan the outage,
 stop Tunnel then daemon, and confirm compatibility with existing durable state
 and canonical image. Set `mcp_source_revision` in the final manifest to the exact
-accepted commit, validate/re-hash the candidate, refresh final-stage observations
-and run the formal ordinary entry from the matching clean reviewed deployment
+accepted commit, validate the candidate final manifest; when the optional
+`--manifest-sha256`/`--inventory-sha256` flags are used, hash the exact bytes
+that will be consumed. Obtain a fresh provider record with `scripts/oci-observe`
+and run the formal final entry (whose guest join and confirmation follow the
+final-stage runbook above) from the matching clean reviewed deployment
 checkout. Observe local startup again. No implicit journal migration or canonical-image switch is
 supported. Existing generations referring to another canonical image fail closed.
 

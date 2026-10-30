@@ -105,12 +105,14 @@ def public_list(values, minimum, maximum, name):
     return result
 
 
-def inputs(uid, gid, resolvers, host_public_ips):
+def inputs(uid, gid, resolvers, host_public_ipv4, host_gua_ipv6):
     identity(uid, gid)
-    # The dedicated OCI host has public NAT addresses that need not appear on
-    # an interface. Inventory must enumerate them; addrtype LOCAL covers all
-    # currently assigned addresses independently, including later IPv6 changes.
-    hosts = public_list(host_public_ips, 1, 64, 'host public IP')
+    ipv4, ipv6 = literal(host_public_ipv4), literal(host_gua_ipv6)
+    require(ipv4.version == 4 and public(ipv4), 'public host IPv4 required')
+    require(ipv6.version == 6 and public(ipv6), 'public host GUA IPv6 required')
+    # Provider NAT IPv4 and guest-joined GUA are supplied only by the entry.
+    # LOCAL independently covers all currently assigned interface addresses.
+    hosts = [str(ipv4), str(ipv6)]
     dns = public_list(resolvers, 1, 3, 'public resolver')
     require(not set(dns).intersection(hosts), 'resolver is the host itself')
     return dns, hosts

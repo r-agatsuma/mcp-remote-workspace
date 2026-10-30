@@ -141,32 +141,38 @@ class Inputs(unittest.TestCase):
         for address in ['192.0.0.9', '192.0.0.10', '192.0.0.8', '192.0.0.170', '192.0.0.171']:
             with self.subTest(address=address):
                 with self.assertRaises(ValueError):
-                    network.inputs(947, 952, [address], HOSTS)
+                    network.inputs(947, 952, [address], *HOSTS)
                 with self.assertRaises(ValueError):
                     network.direct_resolv_conf([address])
 
     def test_ordered_public_literals_and_length_one_to_three(self):
         for count in [1, 2, 3]:
-            self.assertEqual(network.inputs(947, 952, DNS[:count], HOSTS), (DNS[:count], HOSTS))
-        self.assertEqual(network.inputs(20481, 31002, [DNS[1]], HOSTS)[0], [DNS[1]])
+            self.assertEqual(network.inputs(947, 952, DNS[:count], *HOSTS), (DNS[:count], HOSTS))
+        self.assertEqual(network.inputs(20481, 31002, [DNS[1]], *HOSTS)[0], [DNS[1]])
 
     def test_prohibited_literals_and_no_fallback(self):
         for address in BAD:
             with self.subTest(address=address), self.assertRaises(ValueError):
-                network.inputs(947, 952, [address], HOSTS)
+                network.inputs(947, 952, [address], *HOSTS)
 
     def test_bad_lists_duplicates_self_and_identity(self):
         for values in [None, '', DNS[0], [], DNS + ['1.0.0.1'], [DNS[0], DNS[0]],
                        [DNS[1], '2606:4700:4700:0:0:0:0:1111'], [None], [42], [HOSTS[0]]]:
             with self.subTest(values=values), self.assertRaises(ValueError):
-                network.inputs(947, 952, values, HOSTS)
-        for hosts in [[], [HOSTS[0]] * 2, ['10.0.0.1'], ['host.example']]:
+                network.inputs(947, 952, values, *HOSTS)
+        for v4, v6 in [(None, HOSTS[1]), (HOSTS[0], None), (HOSTS[1], HOSTS[0]),
+                       (HOSTS[1], HOSTS[1]), (HOSTS[0], HOSTS[0]),
+                       ('10.0.0.1', HOSTS[1]), (HOSTS[0], 'fd00::1'), ('host.example', HOSTS[1]),
+                       (HOSTS[0], '2001:db8::1'), ('192.0.2.1', HOSTS[1])]:
+            with self.subTest(v4=v4, v6=v6), self.assertRaises(ValueError):
+                network.inputs(947, 952, DNS, v4, v6)
+        for host in HOSTS:
             with self.assertRaises(ValueError):
-                network.inputs(947, 952, DNS, hosts)
+                network.inputs(947, 952, [host], *HOSTS)
         for uid, gid in [(0, 952), (947, 0), (-1, 952), (True, 952), ('947', 952),
                          (947, 2**31), (2**32, 952)]:
             with self.assertRaises(ValueError):
-                network.inputs(uid, gid, DNS, HOSTS)
+                network.inputs(uid, gid, DNS, *HOSTS)
 
 
 class Rendering(unittest.TestCase):
@@ -188,6 +194,20 @@ class Rendering(unittest.TestCase):
                 updated = network.render_rules(rendered, rendered, uid, 4, HOSTS,
                                                dict(endpoint, port=port % 65535 + 1))
                 self.assertNotIn(expected + '\n', updated)
+
+    def test_fixed_self_drops_exact_order_with_local_and_mcp_reply(self):
+        _, hosts = network.inputs(947, 952, DNS, *HOSTS)
+        for family, address, bits in [(4, HOSTS[0], 32), (6, HOSTS[1], 128)]:
+            _, rules = network.runner_rules(947, family, hosts, ENDPOINT)
+            self.assertEqual(rules[-2:], [f'-A {network.CHAIN} -d {address}/{bits} -j DROP',
+                                         f'-A {network.CHAIN} -j ACCEPT'])
+            local = f'-A {network.CHAIN} -m addrtype --dst-type LOCAL -j DROP'
+            if family == 4:
+                self.assertEqual(rules[:3], [reply_rule(ENDPOINT['port']), local,
+                    f'-A {network.CHAIN} -m addrtype --dst-type BROADCAST -j DROP'])
+            else:
+                self.assertEqual(rules[:2], [local, f'-A {network.CHAIN} ! -d 2000::/3 -j DROP'])
+            self.assertTrue(all(rule.endswith(' -j DROP') for rule in rules[1:-1]))
 
     def test_only_owned_additions_and_no_broad_accept_anywhere(self):
         # Existing operator policy may legitimately contain these constructs.
@@ -348,7 +368,7 @@ class Rendering(unittest.TestCase):
         self.assertNotIn("'!'", ipv6)
 
     def test_direct_host_view_same_order_and_no_daemon_or_stub(self):
-        dns, _ = network.inputs(947, 952, DNS, HOSTS)
+        dns, _ = network.inputs(947, 952, DNS, *HOSTS)
         text = network.direct_resolv_conf(dns)
         self.assertEqual([line.split()[1] for line in text.splitlines() if line.startswith('nameserver ')], dns)
         self.assertNotIn('127.0.0.53', text)
@@ -592,7 +612,7 @@ class Planner(unittest.TestCase):
                 patch.object(planner, 'trusted_read', side_effect=read), \
                 patch.object(planner.os.path, 'realpath', return_value='/usr/sbin/xtables-nft-multi'), \
                 patch.object(planner, 'command', side_effect=execute) as calls:
-            result = planner.plan(uid, gid, DNS, HOSTS, endpoint)
+            result = planner.plan(uid, gid, DNS, *HOSTS, endpoint)
             self.assertEqual([call.args[0] for call in calls.call_args_list if call.args[0][-1] == '--test'], [
                 ['/usr/sbin/iptables-nft-restore', '--test'], ['/usr/sbin/ip6tables-nft-restore', '--test']])
             return result
@@ -636,7 +656,7 @@ class Planner(unittest.TestCase):
                          dict(ENDPOINT, port=True), dict(ENDPOINT, port=65536), None]:
             with patch.object(planner, 'trusted_read') as read, patch.object(planner, 'command') as command:
                 with self.assertRaises(ValueError):
-                    planner.plan(947, 952, DNS, HOSTS, endpoint)
+                    planner.plan(947, 952, DNS, *HOSTS, endpoint)
                 read.assert_not_called()
                 command.assert_not_called()
 
@@ -646,7 +666,7 @@ class Planner(unittest.TestCase):
         from ansible.module_utils import basic
         for port in [ENDPOINT['port'], '8080', True, 8080.0]:
             endpoint = dict(ENDPOINT, port=port)
-            params = dict(uid=947, gid=952, resolvers=DNS, host_public_ips=HOSTS, endpoint=endpoint)
+            params = dict(uid=947, gid=952, resolvers=DNS, host_public_ipv4=HOSTS[0], host_gua_ipv6=HOSTS[1], endpoint=endpoint)
             with patch.object(basic, '_load_params', return_value=params), \
                     patch.object(planner, 'plan', return_value={}) as plan, \
                     patch.object(basic.AnsibleModule, 'exit_json'), \
@@ -731,7 +751,7 @@ class Source(unittest.TestCase):
         for uid, gid in [(947, 952), (20481, 31002)]:
             tasks.extend([
                 {'ansible.builtin.set_fact': dict(mcp_runner_account='mcp-runner', mcp_runner_uid=uid,
-                    mcp_runner_primary_gid=gid, mcp_public_dns=DNS, mcp_host_public_ips=HOSTS,
+                    mcp_runner_primary_gid=gid, mcp_public_dns=DNS, mcp_host_public_ipv4=HOSTS[0], mcp_host_gua_ipv6=HOSTS[1],
                     mcp_network_plan={'public_dns': DNS})}, gate, export,
                 {'ansible.builtin.assert': {'that': ['mcp_public_dns_validated == mcp_public_dns']}}])
         play = [{'name': 'S3D source-only Ansible fact interface', 'hosts': 'localhost',
@@ -748,7 +768,7 @@ class Source(unittest.TestCase):
         tasks = yaml.safe_load((ROOT / 'roles/s3d/tasks/main.yml').read_text())
         plan = next(task for task in tasks if 'mcp_network_plan' in task)
         self.assertEqual(plan['mcp_network_plan'], dict(uid='{{ mcp_runner_uid }}', gid='{{ mcp_runner_primary_gid }}',
-            resolvers='{{ mcp_public_dns }}', host_public_ips='{{ mcp_host_public_ips }}', endpoint='{{ mcp_production_endpoint }}'))
+            resolvers='{{ mcp_public_dns }}', host_public_ipv4='{{ mcp_host_public_ipv4 }}', host_gua_ipv6='{{ mcp_host_gua_ipv6 }}', endpoint='{{ mcp_production_endpoint }}'))
         identity = (ROOT / 'roles/s3a/tasks/assert_created_identities.yml').read_text()
         for fact, index in [('mcp_runner_uid', 1), ('mcp_runner_primary_gid', 2)]:
             self.assertIn(f'{fact}: "{{{{ mcp_current_runner_passwd[{index}] | int }}}}"', identity)
@@ -769,7 +789,8 @@ class Source(unittest.TestCase):
         self.assertFalse(any(task.get('become_user') for task in tasks))
         defaults = yaml.safe_load((ROOT / 'group_vars/all.yml').read_text())
         self.assertEqual(defaults['mcp_public_dns'], ['8.8.8.8', '8.8.4.4'])
-        self.assertEqual(defaults['mcp_host_public_ips'], [])
+        self.assertEqual(defaults['mcp_host_public_ipv4'], '')
+        self.assertEqual(defaults['mcp_host_gua_ipv6'], '')
         self.assertNotIn('mcp_runner_uid', defaults)
         self.assertNotIn('mcp_runner_primary_gid', defaults)
 

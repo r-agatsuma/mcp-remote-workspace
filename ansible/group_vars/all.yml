@@ -40,9 +40,11 @@ mcp_runner_subid_count: 65536
 mcp_public_dns:
   - 8.8.8.8
   - 8.8.4.4
-# All host public addresses, including provider NAT/floating addresses that are
-# not assigned to a NIC. Interface-local addresses are also denied dynamically.
-mcp_host_public_ips: []
+# Exactly one provider NAT IPv4 and one guest-joined public GUA IPv6.
+# LOCAL independently denies interface-local destinations.
+# Fail closed: supplied only by the formal entry's provider/guest join.
+mcp_host_public_ipv4: ''
+mcp_host_gua_ipv6: ''
 
 # S3E: the only shared daemon/recovery configuration authority. ReferencePolicy
 # values and the canonical image are source policy; only Tunnel ID is per-instance.

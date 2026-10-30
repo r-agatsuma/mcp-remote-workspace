@@ -16,7 +16,7 @@ BOOTSTRAP = frozenset({
 })
 FINAL = BOOTSTRAP | {
     'mcp_data_uuid', 'mcp_runner_subuid_start', 'mcp_runner_subgid_start',
-    'mcp_host_public_ips', 'mcp_tunnel_id',
+    'mcp_tunnel_id',
 }
 
 
@@ -124,20 +124,19 @@ def validate(raw, stage):
             start = value[key]
             require(type(start) is int and 0 < start <= 2**32 - 1 - 65536,
                     'positive subordinate start within the reference allocation range required')
-        addresses = value['mcp_host_public_ips']
-        require(type(addresses) is list and bool(addresses), 'nonempty public IP list required')
-        parsed = [literal_ip(address) for address in addresses]
-        require(len(set(parsed)) == len(parsed), 'duplicate public IP')
         require(match(value['mcp_tunnel_id'], r'tunnel_[0-9a-f]{32}'), 'exact Tunnel ID required')
     return value
 
 
-def locator(raw):
+def locator(raw, stage):
     """Input is a locator mapping, never an Ansible inventory/variable source."""
+    require(stage in ('bootstrap', 'final'), 'unknown locator stage')
     value = parse(raw)
-    mapping(value, {'host', 'port', 'user'})
+    mapping(value, {'host', 'port', 'user'} if stage == 'bootstrap' else {'port', 'user'})
     require(type(value['port']) is int and 1 <= value['port'] <= 65535, 'valid SSH port required')
     require(match(value['user'], r'[a-z_][a-z0-9_-]*'), 'literal SSH user required')
+    if stage == 'final':
+        return value
     host = value['host']
     require(type(host) is str, 'literal IP or DNS locator required')
     try:

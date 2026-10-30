@@ -30,7 +30,6 @@ BOOTSTRAP = {
 FINAL = BOOTSTRAP | {
     'mcp_data_uuid': '12345678-1234-1234-1234-123456789abc',
     'mcp_runner_subuid_start': 200000, 'mcp_runner_subgid_start': 300000,
-    'mcp_host_public_ips': ['192.0.2.10', '2001:db8::10'],
     'mcp_tunnel_id': 'tunnel_' + '0' * 32,
 }
 LOCATOR = {'host': 'target.example.invalid', 'user': 'operator', 'port': 22}
@@ -98,8 +97,6 @@ class Manifest(unittest.TestCase):
             'mcp_data_uuid': ['bad', '12345678-1234-1234-1234-123456789ABC'],
             'mcp_runner_subuid_start': [0, -1, True, '200000', 2**32 - 65536],
             'mcp_runner_subgid_start': [0, -1, 1.5, 2**32],
-            'mcp_host_public_ips': [[], '192.0.2.10', ['example.invalid'], ['192.0.2.01'],
-                                    ['::ffff:192.0.2.10'], ['fe80::1%eth0'], ['192.0.2.10', '192.0.2.10']],
             'mcp_tunnel_id': ['tunnel_' + 'A' * 32, 'tunnel_123', 1],
         }
         for key, values in bad.items():
@@ -110,22 +107,25 @@ class Manifest(unittest.TestCase):
     def test_exhaustive_policy_and_secret_rejection(self):
         keys = OVERRIDES | {'api_key': 'FORBIDDEN_FIELD', 'mcp_tunnel_api_key': 'FORBIDDEN_FIELD',
                             'mcp_data_bootstrap_enabled': True, 'ansible_ssh_common_args': 'options',
-                            'vars_files': ['alternate.yml'], 'unknown': 1}
+                            'vars_files': ['alternate.yml'], 'unknown': 1,
+                            # Retired/injected inputs must never enter either manifest.
+                            'mcp_host_public_ips': ['11.12.13.14'],
+                            'mcp_host_public_ipv4': '11.12.13.14', 'mcp_host_gua_ipv6': '2600:1234::5'}
         for key, value in keys.items():
             for stage, good in [('bootstrap', BOOTSTRAP), ('final', FINAL)]:
                 with self.subTest(stage=stage, key=key), self.assertRaises(ValueError):
                     schema.validate(dump(good | {key: value}), stage)
 
     def test_locator_has_no_variable_or_connection_escape_hatch(self):
-        self.assertEqual(schema.locator(dump(LOCATOR)), LOCATOR)
+        self.assertEqual(schema.locator(dump(LOCATOR), 'bootstrap'), LOCATOR)
         for key, value in OVERRIDES.items():
             with self.assertRaises(ValueError):
-                schema.locator(dump(LOCATOR | {key: value}))
+                schema.locator(dump(LOCATOR | {key: value}), 'bootstrap')
         for change in ({'ansible_connection': 'local'}, {'host': '-oProxyCommand=bad'},
                        {'host': '{{ value }}'}, {'port': '22'}, {'user': 'root; command'},
                        {'all': {'vars': OVERRIDES}}, {'vars_files': ['alternate.yml']}):
             with self.subTest(change=change), self.assertRaises(ValueError):
-                schema.locator(dump(LOCATOR | change))
+                schema.locator(dump(LOCATOR | change), 'bootstrap')
 
 
 class Invocation(unittest.TestCase):
@@ -151,7 +151,7 @@ class Invocation(unittest.TestCase):
                      ['--', '--extra-vars', 'x=y']]:
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 DEPLOY['arguments'](base + args)
-        for args in [['--final-observation', 'observation.yml']]:
+        for args in [['--provider-record', 'provider.json']]:
             with self.assertRaises(ValueError):
                 DEPLOY['arguments'](base + args)
         with self.assertRaises(ValueError):
@@ -210,19 +210,6 @@ class Invocation(unittest.TestCase):
         for key in grant:
             with self.subTest(key=key), self.assertRaises(ValueError):
                 DEPLOY['bootstrap_grant'](dump(grant | {key: 'WRONG'}), BOOTSTRAP, 'a' * 64, 'b' * 64)
-
-    def test_final_observation_binding_and_set_equality(self):
-        record = {'manifest_sha256': 'a' * 64, 'inventory_sha256': 'b' * 64,
-                  'host_key_sha256': FINAL['mcp_target_ssh_host_key_sha256'],
-                  'public_ips': list(reversed(FINAL['mcp_host_public_ips'])),
-                  'observed_at': '2026-01-01T00:00:00Z',
-                  'provider_evidence_sha256': 'c' * 64, 'guest_evidence_sha256': 'd' * 64}
-        DEPLOY['final_observation'](dump(record), FINAL, 'a' * 64, 'b' * 64)
-        for change in ({'public_ips': ['192.0.2.11']}, {'manifest_sha256': 'c' * 64},
-                       {'host_key_sha256': 'wrong'}, {'observed_at': '2999-01-01T00:00:00Z'},
-                       {'observed_at': '2026-01-40T00:00:00Z'}, {'guest_evidence_sha256': ''}):
-            with self.subTest(change=change), self.assertRaises(ValueError):
-                DEPLOY['final_observation'](dump(record | change), FINAL, 'a' * 64, 'b' * 64)
 
     def test_pin_is_authenticated_identity_not_locator_or_tofu(self):
         blob = base64.b64encode(b'synthetic public host key').decode()
@@ -297,27 +284,6 @@ class Invocation(unittest.TestCase):
             self.assertEqual(calls, ['ssh-keyscan', 'ssh', '/synthetic/ansible-playbook'])
             self.assertEqual((root / 'evidence/manifest.yml').read_bytes(), raw)
             self.assertEqual(json.loads((root / 'evidence/result.json').read_bytes()), {'exit_code': 0})
-
-    def test_final_run_cannot_bypass_operator_freshness_with_noninteractive_input(self):
-        with tempfile.TemporaryDirectory(prefix='freshness-') as temporary:
-            root = Path(temporary)
-            mh, ih = DEPLOY['sha'](dump(FINAL)), DEPLOY['sha'](dump(LOCATOR))
-            record = {'manifest_sha256': mh, 'inventory_sha256': ih,
-                      'host_key_sha256': FINAL['mcp_target_ssh_host_key_sha256'],
-                      'public_ips': FINAL['mcp_host_public_ips'], 'observed_at': '2026-01-01T00:00:00Z',
-                      'provider_evidence_sha256': 'c' * 64, 'guest_evidence_sha256': 'd' * 64}
-            for name, value in [('manifest.yml', FINAL), ('locator.yml', LOCATOR), ('observation.yml', record)]:
-                DEPLOY['private_write'](root / name, dump(value))
-            main = DEPLOY['main']
-            with patch.dict(main.__globals__, source_binding=lambda *args: None), \
-                    patch.object(DEPLOY['sys'].stdin, 'isatty', return_value=False), \
-                    patch.object(DEPLOY['socket'], 'getaddrinfo') as network:
-                with self.assertRaisesRegex(ValueError, 'consumption-time'):
-                    main(['run', 'final', '--manifest', str(root / 'manifest.yml'),
-                          '--inventory', str(root / 'locator.yml'), '--manifest-sha256', mh,
-                          '--inventory-sha256', ih, '--final-observation', str(root / 'observation.yml'),
-                          '--evidence-dir', str(root / 'evidence')])
-                network.assert_not_called()
 
 
 class SourceBoundary(unittest.TestCase):
