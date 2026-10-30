@@ -502,8 +502,11 @@ For an application/deployment upgrade, review the exact repository change and
 source checks, record old/new commits and non-secret inputs, plan the outage,
 stop Tunnel then daemon, and confirm compatibility with existing durable state
 and canonical image. Set `mcp_source_revision` in the final manifest to the exact
-accepted commit, validate/re-hash the candidate, refresh final-stage observations
-and run the formal ordinary entry from the matching clean reviewed deployment
+accepted commit, validate the candidate final manifest; when the optional
+`--manifest-sha256`/`--inventory-sha256` flags are used, hash the exact bytes
+that will be consumed. Obtain a fresh provider record with `scripts/oci-observe`
+and run the formal final entry (whose guest join and confirmation follow the
+final-stage runbook above) from the matching clean reviewed deployment
 checkout. Observe local startup again. No implicit journal migration or canonical-image switch is
 supported. Existing generations referring to another canonical image fail closed.
 

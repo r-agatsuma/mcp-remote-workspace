@@ -365,14 +365,18 @@ The planner rejects malformed mappings, other addresses and non-integer ports
 (including strings and booleans), without coercion or fallback. Python rendering
 has no independent production port default.
 
-Only the per-instance host-public-IP list remains empty and fails closed. The
+The per-instance self-address variables `mcp_host_public_ipv4` and
+`mcp_host_gua_ipv6` default to empty and fail closed until `scripts/deploy`
+injects the provider-record public IPv4 and the guest-joined GUA. The
 ordered resolver pair is source-owned v0 reference policy, not a universal
-product default. Reconcile and re-hash the final manifest whenever provider
-address assignments change; fresh provider/guest equality is a per-run gate.
-Actual interface addresses are additionally denied through
-Netfilter's `addrtype LOCAL`, independent of inventory; a resolver matching a
-listed or currently assigned host address is rejected. These lists are trusted
-deployment state, never workspace/Dockerfile input.
+product default. A provider address change requires a fresh provider record
+from `scripts/oci-observe` and a guest join for the final invocation. The final
+manifest forbids address inputs, so that change requires neither a manifest
+edit nor a new manifest hash. Actual interface addresses are additionally
+denied through Netfilter's `addrtype LOCAL`; a resolver matching either
+validated self address or a currently assigned host address is rejected.
+These self-address facts are trusted, entry-injected deployment state, never
+manifest, workspace or Dockerfile input.
 
 The transient read-only Ansible planner validates inputs, snapshots
 `iptables-nft-save` / `ip6tables-nft-save`, and composes `/etc/iptables/rules.v4`
