@@ -8,6 +8,7 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,10 @@ import tempfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from deployment.manifest import locator, mapping, match, parse, require, validate
+from deployment.manifest import literal_ip, locator, mapping, match, parse, require, validate
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ansible/module_utils'))
+from mcp_network import public
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -142,28 +146,91 @@ def bootstrap_grant(raw, manifest, manifest_hash, inventory_hash):
     require(grant == expected, 'Human destructive grant must name this exact bound target/candidate')
 
 
-def final_observation(raw, manifest, manifest_hash, inventory_hash):
-    record = parse(raw)
-    mapping(record, {'manifest_sha256', 'inventory_sha256', 'host_key_sha256',
-                     'observed_at', 'public_ips', 'provider_evidence_sha256', 'guest_evidence_sha256'})
-    require(record['manifest_sha256'] == manifest_hash and record['inventory_sha256'] == inventory_hash
-            and record['host_key_sha256'] == manifest['mcp_target_ssh_host_key_sha256'],
-            'final observation belongs to a different candidate')
-    from deployment.manifest import literal_ip
-    addresses = record['public_ips']
-    require(type(addresses) is list and bool(addresses), 'fresh complete address list required')
-    parsed = [literal_ip(address) for address in addresses]
-    require(len(set(parsed)) == len(parsed)
-            and set(parsed) == {literal_ip(address) for address in manifest['mcp_host_public_ips']},
-            'fresh public-address set differs from manifest')
-    for key in ('provider_evidence_sha256', 'guest_evidence_sha256'):
-        require(match(record[key], r'[0-9a-f]{64}'), 'restricted observation evidence SHA256 required')
-    require(match(record['observed_at'], r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'), 'UTC observation time required')
+def json_input(raw):
+    """Bounded UTF-8 JSON, with duplicate rejection before schema validation."""
+    require(type(raw) is bytes and len(raw) <= 65536, 'JSON input exceeds 64 KiB')
+
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, 'duplicate JSON key')
+            result[key] = value
+        return result
+
+    def constant(value):
+        raise ValueError('non-JSON numeric constant')
+
+    try:
+        text = raw.decode('utf-8')
+        require(not text.startswith('\ufeff'), 'UTF-8 BOM is not accepted')
+        return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        raise ValueError('malformed JSON input') from None
+
+
+def provider_record(raw):
+    record = json_input(raw)
+    mapping(record, {'schema', 'instance_ocid', 'observed_at', 'lifecycle_state',
+                     'vnic_attachment_count', 'private_ip_count', 'ipv6_count',
+                     'primary_private_ipv4', 'public_ipv4', 'gua_ipv6'})
+    require(record['schema'] == 'mcp-oci-observation/1', 'unsupported provider record schema')
+    require(match(record['instance_ocid'], r'ocid1\.instance\.[a-z0-9._-]+'), 'instance OCID required')
+    require(record['lifecycle_state'] == 'RUNNING', 'RUNNING instance required')
+    for key in ('vnic_attachment_count', 'private_ip_count', 'ipv6_count'):
+        require(type(record[key]) is int and record[key] == 1, 'exactly one provider object required')
+    private, ipv4, ipv6 = (literal_ip(record[key]) for key in
+                          ('primary_private_ipv4', 'public_ipv4', 'gua_ipv6'))
+    require(private.version == 4 and any(private in ipaddress.ip_network(prefix) for prefix in
+            ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')), 'RFC 1918 private IPv4 required')
+    require(ipv4.version == 4 and public(ipv4), 'public IPv4 required')
+    require(ipv6.version == 6 and public(ipv6), 'public GUA IPv6 required')
+    require(match(record['observed_at'], r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'),
+            'UTC observation time required')
     observed = datetime.strptime(record['observed_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
     require(observed <= datetime.now(timezone.utc), 'future observation is invalid')
-    # No invented universal freshness TTL. The responsible operator must
-    # establish consumption-time freshness and attribution for this very entry.
     return record
+
+
+def guest_join(raw, record):
+    links = json_input(raw)
+    require(type(links) is list, 'guest address list required')
+    addresses = {4: set(), 6: set()}
+    for link in links:
+        require(type(link) is dict and type(link.get('ifname')) is str
+                and type(link.get('flags')) is list and type(link.get('addr_info')) is list,
+                'malformed guest interface')
+        if link['ifname'] == 'lo' or 'LOOPBACK' in link['flags']:
+            continue
+        for item in link['addr_info']:
+            require(type(item) is dict and type(item.get('scope')) is str,
+                    'malformed guest address')
+            if item['scope'] != 'global':
+                continue
+            address = literal_ip(item.get('local'))
+            require(item.get('family') == ('inet' if address.version == 4 else 'inet6'),
+                    'guest address family mismatch')
+            addresses[address.version].add(address)
+    require(addresses[4] == {literal_ip(record['primary_private_ipv4'])}
+            and addresses[6] == {literal_ip(record['gua_ipv6'])}, 'guest/provider address join differs')
+
+
+def confirm(record, fingerprint):
+    require(sys.stdin.isatty(), 'final entry requires tty stdin')
+    print('Provider record: ' + json.dumps(record, sort_keys=True))
+    print('Matched SSH fingerprint: ' + fingerprint)
+    print('Guest join: PASS (global IPv4 and IPv6 sets exactly match the provider record)')
+    print('In the OCI console, for the VNIC of instance `' + record['instance_ocid'] +
+          '`: every Security List of its subnet and every NSG attached to that VNIC must have no ingress rule '
+          'that admits TCP (protocol TCP or All) from an IPv6 source. '
+          'Confirm you checked this for this same instance.')
+    try:
+        answer = input('Continue? [y] ')
+    except EOFError:
+        answer = ''
+    if answer != 'y':
+        print('STOP: not confirmed', file=sys.stderr)
+        raise ValueError('not confirmed')
+    return {'answer': answer, 'confirmed_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
 
 
 def pinned_key(scan, expected):
@@ -205,16 +272,18 @@ def arguments(argv=None):
     parser.add_argument('--inventory-sha256')
     parser.add_argument('--evidence-dir', type=Path, help='new restricted directory outside the checkout')
     parser.add_argument('--bootstrap-grant', type=Path)
-    parser.add_argument('--final-observation', type=Path)
+    parser.add_argument('--provider-record', type=Path)
     args = parser.parse_args(argv)
-    require(not (args.stage == 'bootstrap' and args.final_observation), 'bootstrap cannot consume final observation')
+    require(not (args.stage == 'bootstrap' and args.provider_record), 'bootstrap cannot consume provider record')
     require(not (args.stage == 'final' and args.bootstrap_grant), 'final cannot consume destructive grant')
     if args.action == 'run':
-        require(match(args.manifest_sha256, r'[0-9a-f]{64}')
-                and match(args.inventory_sha256, r'[0-9a-f]{64}') and args.evidence_dir,
-                'run requires accepted manifest/inventory hashes and a new evidence directory')
-        require(args.bootstrap_grant if args.stage == 'bootstrap' else args.final_observation,
-                'run requires its stage-specific grant/observation')
+        require(args.evidence_dir, 'run requires a new evidence directory')
+        if args.stage == 'bootstrap':
+            require(match(args.manifest_sha256, r'[0-9a-f]{64}')
+                    and match(args.inventory_sha256, r'[0-9a-f]{64}'),
+                    'bootstrap run requires accepted manifest/inventory hashes')
+        require(args.bootstrap_grant if args.stage == 'bootstrap' else args.provider_record,
+                'run requires its stage-specific grant/provider record')
     return args
 
 
@@ -222,7 +291,7 @@ def main(argv=None):
     args = arguments(argv)
     raw = read_input(args.manifest, private=args.action == 'run')
     inventory_raw = read_input(args.inventory, private=args.action == 'run')
-    manifest, location = validate(raw, args.stage), locator(inventory_raw)
+    manifest, location = validate(raw, args.stage), locator(inventory_raw, args.stage)
     manifest_hash, inventory_hash = sha(raw), sha(inventory_raw)
     source_binding(ROOT, manifest['mcp_source_revision'])
     for accepted, actual in [(args.manifest_sha256, manifest_hash), (args.inventory_sha256, inventory_hash)]:
@@ -234,14 +303,13 @@ def main(argv=None):
         return 0
 
     grant_raw = read_input(args.bootstrap_grant, private=True) if args.bootstrap_grant else None
-    observation_raw = read_input(args.final_observation, private=True) if args.final_observation else None
+    provider_raw = read_input(args.provider_record, private=True) if args.provider_record else None
     if grant_raw is not None:
         bootstrap_grant(grant_raw, manifest, manifest_hash, inventory_hash)
         binding['bootstrap_grant_sha256'] = sha(grant_raw)
-    if observation_raw is not None:
-        final_observation(observation_raw, manifest, manifest_hash, inventory_hash)
-        binding['final_observation_sha256'] = sha(observation_raw)
-        require(sys.stdin.isatty(), 'final entry requires operator consumption-time freshness confirmation')
+    if provider_raw is not None:
+        record = provider_record(provider_raw)
+        binding['provider_record_sha256'] = sha(provider_raw)
 
     evidence = args.evidence_dir.resolve()
     require(not evidence.is_relative_to(ROOT), 'evidence must be outside the checkout')
@@ -251,8 +319,8 @@ def main(argv=None):
     private_write(evidence / 'locator.yml', inventory_raw)
     if grant_raw is not None:
         private_write(evidence / 'bootstrap-grant.yml', grant_raw)
-    if observation_raw is not None:
-        private_write(evidence / 'final-observation.yml', observation_raw)
+    if provider_raw is not None:
+        private_write(evidence / 'provider-record.json', provider_raw)
 
     executable = shutil.which('ansible-playbook')
     require(executable is not None, 'Ansible controller is unavailable')
@@ -269,9 +337,12 @@ def main(argv=None):
                'ANSIBLE_SSH_RETRIES': '0', 'PYTHONDONTWRITEBYTECODE': '1'}
         if 'SSH_AUTH_SOCK' in os.environ:
             env['SSH_AUTH_SOCK'] = os.environ['SSH_AUTH_SOCK']
-        addresses = {item[4][0] for item in socket.getaddrinfo(location['host'], location['port'], type=socket.SOCK_STREAM)}
-        require(len(addresses) == 1, 'locator must resolve unambiguously for this invocation')
-        address = addresses.pop()
+        if args.stage == 'final':
+            address = record['public_ipv4']
+        else:
+            addresses = {item[4][0] for item in socket.getaddrinfo(location['host'], location['port'], type=socket.SOCK_STREAM)}
+            require(len(addresses) == 1, 'locator must resolve unambiguously for this invocation')
+            address = addresses.pop()
         scan = subprocess.run(['ssh-keyscan', '-T', '15', '-p', str(location['port']), address],
                               env=env, capture_output=True, text=True, timeout=60, check=True)
         key = pinned_key(scan.stdout, manifest['mcp_target_ssh_host_key_sha256'])
@@ -279,15 +350,18 @@ def main(argv=None):
         private_write(known_hosts, ('mcp-deployment ' + key + '\n').encode())
         options = connection_options(known_hosts)
         # The scan is untrusted key retrieval, never TOFU. Prove possession using
-        # the accepted key before requesting freshness confirmation or mutation.
+        # the accepted key before the guest join, confirmation or mutation.
         subprocess.run(['ssh', *options, '-p', str(location['port']), '-l', location['user'],
                         address, '/usr/bin/true'], env=env, capture_output=True, check=True, timeout=30)
-        if observation_raw is not None:
-            print('Fresh provider + guest observations must be unambiguously joined to this authenticated host;')
-            print('their complete public-address set must still equal this manifest at consumption.')
-            answer = input('After verifying that prerequisite NOW, type the final observation SHA256: ')
-            require(answer == sha(observation_raw), 'freshness/attribution not confirmed; STOP before mutation')
-            binding['freshness_confirmed_at'] = datetime.now(timezone.utc).isoformat()
+        if args.stage == 'final':
+            guest = subprocess.run(['ssh', *options, '-p', str(location['port']), '-l', location['user'],
+                                    address, '/usr/sbin/ip -j addr show scope global'],
+                                   env=env, capture_output=True, check=True, timeout=30)
+            guest_join(guest.stdout, record)
+            private_write(evidence / 'guest-join.json', guest.stdout)
+            binding['guest_join_sha256'] = sha(guest.stdout)
+            confirmation = confirm(record, manifest['mcp_target_ssh_host_key_sha256'])
+            private_write(evidence / 'confirmation.json', encoded(confirmation))
         inventory = {'all': {'children': {'mcp_hosts': {'hosts': {'mcp_target': {
             'ansible_host': address, 'ansible_user': location['user'], 'ansible_port': location['port'],
             'ansible_connection': 'ssh', 'ansible_ssh_args': shlex.join(options),
@@ -297,6 +371,8 @@ def main(argv=None):
         variables = dict(manifest)
         if args.stage == 'bootstrap':
             variables['mcp_data_bootstrap_enabled'] = True
+        else:
+            variables.update(mcp_host_public_ipv4=record['public_ipv4'], mcp_host_gua_ipv6=record['gua_ipv6'])
         inventory_path, variables_path = directory / 'inventory.json', directory / 'variables.json'
         private_write(inventory_path, encoded(inventory))
         private_write(variables_path, encoded(variables))

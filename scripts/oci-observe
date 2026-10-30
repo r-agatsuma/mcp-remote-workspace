@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Read-only OCI Cloud Shell observation; stdout is one provider record or empty.
+
+Run from the exact reviewed source tree. Uses only Python's standard library
+and the repository's pure public-destination predicate. OCI CLI owns its default
+console-session authentication; this helper supplies no credential/config flags.
+"""
+from datetime import datetime, timezone
+import ipaddress
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ansible/module_utils'))
+from mcp_network import literal, public
+
+
+def require(condition, reason):
+    if not condition:
+        raise ValueError(reason)
+
+
+def cli(command):
+    return subprocess.run(command, capture_output=True, check=True).stdout
+
+
+def observe(instance, runner=cli):
+    require(type(instance) is str and re.fullmatch(r'ocid1\.instance\.[a-z0-9._-]+', instance),
+            'one explicit instance OCID is required')
+
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, 'duplicate CLI JSON key')
+            result[key] = value
+        return result
+
+    def constant(value):
+        raise ValueError('non-JSON numeric constant in CLI output')
+
+    def get(*args):
+        try:
+            raw = runner(['oci', *args])
+            result = json.loads(raw.decode('utf-8'), object_pairs_hook=pairs, parse_constant=constant)
+            require(type(result) is dict and 'data' in result, 'CLI JSON data is missing')
+            return result['data']
+        except (UnicodeError, json.JSONDecodeError, RecursionError):
+            raise ValueError('malformed CLI JSON') from None
+
+    def field(value, key):
+        require(type(value) is dict and key in value, 'missing CLI field: ' + key)
+        return value[key]
+
+    def identifier(value, key):
+        result = field(value, key)
+        require(type(result) is str and result.startswith('ocid1.')
+                and re.fullmatch(r'[a-z0-9._-]+', result), 'invalid CLI object identifier: ' + key)
+        return result
+
+    def one(value, name):
+        require(type(value) is list and len(value) == 1, 'exactly one ' + name + ' required')
+        require(type(value[0]) is dict, 'malformed ' + name)
+        return value[0]
+
+    instance_data = get('compute', 'instance', 'get', '--instance-id', instance)
+    require(field(instance_data, 'lifecycle-state') == 'RUNNING', 'instance is not RUNNING')
+    compartment = identifier(instance_data, 'compartment-id')
+    attachments = get('compute', 'vnic-attachment', 'list', '--compartment-id', compartment,
+                      '--instance-id', instance, '--all')
+    attachment = one(attachments, 'VNIC attachment')
+    require(field(attachment, 'lifecycle-state') == 'ATTACHED', 'attachment is not ATTACHED')
+    vnic_id = identifier(attachment, 'vnic-id')
+    vnic = get('network', 'vnic', 'get', '--vnic-id', vnic_id)
+    require(field(vnic, 'lifecycle-state') == 'AVAILABLE', 'VNIC is not AVAILABLE')
+    private = one(get('network', 'private-ip', 'list', '--vnic-id', vnic_id, '--all'), 'private IP')
+    require(field(private, 'is-primary') is True, 'private IP is not primary')
+    private_id = identifier(private, 'id')
+    private_address = literal(field(private, 'ip-address'))
+    require(private_address.version == 4 and any(private_address in ipaddress.ip_network(prefix)
+            for prefix in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')),
+            'RFC 1918 private IPv4 required')
+    public_ip = get('network', 'public-ip', 'get', '--private-ip-id', private_id)
+    require(field(public_ip, 'private-ip-id') == private_id, 'public IP is bound to a different private IP')
+    public_address = literal(field(public_ip, 'ip-address'))
+    require(public_address.version == 4 and public(public_address), 'public IPv4 required')
+    ipv6 = one(get('network', 'ipv6', 'list', '--vnic-id', vnic_id, '--all'), 'IPv6')
+    require(field(ipv6, 'lifecycle-state') == 'AVAILABLE', 'IPv6 is not AVAILABLE')
+    gua = literal(field(ipv6, 'ip-address'))
+    require(gua.version == 6 and public(gua), 'public GUA IPv6 required')
+    return {'schema': 'mcp-oci-observation/1', 'instance_ocid': instance,
+            'observed_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'lifecycle_state': 'RUNNING', 'vnic_attachment_count': 1, 'private_ip_count': 1, 'ipv6_count': 1,
+            'primary_private_ipv4': str(private_address), 'public_ipv4': str(public_address), 'gua_ipv6': str(gua)}
+
+
+def main(argv=None, runner=cli):
+    args = sys.argv[1:] if argv is None else argv
+    try:
+        require(len(args) == 1, 'usage: scripts/oci-observe <instance-OCID>')
+        record = observe(args[0], runner)
+        print(json.dumps(record, sort_keys=True, separators=(',', ':')))
+        return 0
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        # External command errors may echo private identities or CLI stderr.
+        reason = str(exc) if type(exc) is ValueError else 'OCI CLI read failed'
+        print('OBSERVE STOP: ' + reason, file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

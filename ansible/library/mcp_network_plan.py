@@ -33,8 +33,8 @@ def command(argv, data=None):
     return subprocess.run(argv, input=data, text=True, capture_output=True, check=True).stdout
 
 
-def plan(uid, gid, resolvers, hosts, endpoint):
-    dns, hosts = inputs(uid, gid, resolvers, hosts)
+def plan(uid, gid, resolvers, host_public_ipv4, host_gua_ipv6, endpoint):
+    dns, hosts = inputs(uid, gid, resolvers, host_public_ipv4, host_gua_ipv6)
     endpoint = production_endpoint(endpoint)
     account = pwd.getpwnam('mcp-runner')
     require((account.pw_uid, account.pw_gid) == (uid, gid), 'S3A facts differ from actual account')
@@ -78,12 +78,13 @@ def main():
     module = AnsibleModule(argument_spec=dict(
         uid=dict(type='int', required=True), gid=dict(type='int', required=True),
         resolvers=dict(type='list', elements='str', required=True),
-        host_public_ips=dict(type='list', elements='str', required=True),
+        host_public_ipv4=dict(type='str', required=True),
+        host_gua_ipv6=dict(type='str', required=True),
         # Preserve raw member types: integer coercion would accept string/bool ports.
         endpoint=dict(type='dict', required=True)), supports_check_mode=True)
     try:
         result = plan(module.params['uid'], module.params['gid'], module.params['resolvers'],
-                      module.params['host_public_ips'], module.params['endpoint'])
+                      module.params['host_public_ipv4'], module.params['host_gua_ipv6'], module.params['endpoint'])
         module.exit_json(changed=False, **result)
     except Exception as exc:
         module.fail_json(msg='STOP: ' + str(exc))

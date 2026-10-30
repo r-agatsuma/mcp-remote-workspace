@@ -7,9 +7,9 @@
       - mcp_runner_primary_gid | int > 0
       - mcp_public_dns is sequence and mcp_public_dns is not string
       - mcp_public_dns | length >= 1 and mcp_public_dns | length <= 3
-      - mcp_host_public_ips is sequence and mcp_host_public_ips is not string
-      - mcp_host_public_ips | length > 0
-    fail_msg: 'STOP: S3D requires actual account facts, public DNS and all host public/NAT IPs.'
+      - mcp_host_public_ipv4 is string and mcp_host_public_ipv4 | length > 0
+      - mcp_host_gua_ipv6 is string and mcp_host_gua_ipv6 | length > 0
+    fail_msg: 'STOP: S3D requires actual account facts, public DNS, host public IPv4 and host GUA IPv6.'
 
 - name: Validate trusted production MCP endpoint before host mutation
   ansible.builtin.assert:
@@ -99,7 +99,8 @@
     uid: "{{ mcp_runner_uid }}"
     gid: "{{ mcp_runner_primary_gid }}"
     resolvers: "{{ mcp_public_dns }}"
-    host_public_ips: "{{ mcp_host_public_ips }}"
+    host_public_ipv4: "{{ mcp_host_public_ipv4 }}"
+    host_gua_ipv6: "{{ mcp_host_gua_ipv6 }}"
     endpoint: "{{ mcp_production_endpoint }}"
   register: mcp_network_plan
 

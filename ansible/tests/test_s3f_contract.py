@@ -96,7 +96,7 @@ class Composition(unittest.TestCase):
                               mcp_current_passwd_records={'mcp-runner': runner, 'mcp-tunnel': tunnel},
                               mcp_current_group_records=groups,
                               mcp_runner_groups={'stdout': str(gid)}, mcp_tunnel_groups={'stdout': str(gid + 2)},
-                              mcp_public_dns=dns, mcp_host_public_ips=s3d.HOSTS,
+                              mcp_public_dns=dns, mcp_host_public_ipv4=s3d.HOSTS[0], mcp_host_gua_ipv6=s3d.HOSTS[1],
                               mcp_production_endpoint={'address': '127.0.0.1', 'port': port},
                               mcp_canonical_image='example.invalid/workspace@sha256:' + 'a' * 64,
                               mcp_tunnel_id='tunnel_' + '0' * 32)
@@ -118,7 +118,7 @@ class Composition(unittest.TestCase):
                 facts = json.loads((directory / 'interfaces.json').read_text())
                 args = facts.pop('network_args')
                 self.assertEqual(args, dict(uid=uid, gid=gid, resolvers=dns,
-                                            host_public_ips=s3d.HOSTS, endpoint=values['mcp_production_endpoint']))
+                                            host_public_ipv4=s3d.HOSTS[0], host_gua_ipv6=s3d.HOSTS[1], endpoint=values['mcp_production_endpoint']))
                 # Execute the actual S3D planner under its existing read-only host
                 # doubles, including its independent pwd lookup and parser calls.
                 with patch.object(s3d, 'DNS', args['resolvers']):

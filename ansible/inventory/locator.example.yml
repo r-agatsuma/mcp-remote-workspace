@@ -1,6 +1,7 @@
 ---
 # Formal scripts/deploy locator input, not an Ansible inventory or SSH config.
-# One selected host only. No vars, connection options, plugins or extra files.
+# Bootstrap: include host. Final: remove host; provider record selects the IPv4.
+# No vars, connection options, plugins or extra files.
 host: REPLACE_WITH_IP_OR_DNS_LOCATOR
 port: REPLACE_WITH_INTEGER_SSH_PORT
 user: REPLACE_WITH_OPERATOR_ACCOUNT

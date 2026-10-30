@@ -348,12 +348,14 @@ checkpoint. Independent source review is still required.
 
 S3D consumes `mcp_runner_uid` and `mcp_runner_primary_gid` from S3A, then compares
 both with `pwd.getpwnam('mcp-runner')` at planning time. It never allocates or
-reassigns identities. Source policy and validated final manifest supply:
+reassigns identities. Source policy, validated final manifest and the entry-joined
+provider record supply:
 
 | Input | Contract |
 | --- | --- |
 | `mcp_public_dns` | Source-owned v0 Google resolver pair; the underlying validator requires distinct native public literals |
-| `mcp_host_public_ips` | Complete list of the dedicated host's public IPs, including provider NAT/floating addresses absent from NICs; 1–64 distinct public literals |
+| `mcp_host_public_ipv4` | Exactly one public IPv4, injected by `scripts/deploy` from the provider record; empty fail-closed default, forbidden in the manifest |
+| `mcp_host_gua_ipv6` | Exactly one public IPv6 in `2000::/3`, injected after the pinned SSH guest join; empty fail-closed default, forbidden in the manifest |
 | `mcp_production_endpoint` | Shared production endpoint mapping in `group_vars/all.yml`: `address: 127.0.0.1`, `port: 8080` for the reference deployment; address must be exactly `127.0.0.1` and port an integer in `1..65535` |
 
 The endpoint is the single trusted deployment source for S3D and later #112's
