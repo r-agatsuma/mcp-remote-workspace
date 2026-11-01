@@ -355,7 +355,7 @@ def main(argv=None):
                         address, '/usr/bin/true'], env=env, capture_output=True, check=True, timeout=30)
         if args.stage == 'final':
             guest = subprocess.run(['ssh', *options, '-p', str(location['port']), '-l', location['user'],
-                                    address, '/usr/sbin/ip -j addr show scope global'],
+                                    address, '/usr/sbin/ip -j addr show'],
                                    env=env, capture_output=True, check=True, timeout=30)
             guest_join(guest.stdout, record)
             private_write(evidence / 'guest-join.json', guest.stdout)

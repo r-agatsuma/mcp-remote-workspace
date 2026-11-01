@@ -97,6 +97,16 @@ class GuestJoin(unittest.TestCase):
         extra = {'family': 'inet6', 'local': 'fe80::1', 'scope': 'link'}
         DEPLOY['guest_join'](encoded([GUEST[0] | {'addr_info': GUEST[0]['addr_info'] + [extra]}]), RECORD)
 
+    def test_filtered_json_empty_address_stub_stops_but_unfiltered_data_validates(self):
+        # Observed: 'ip -j addr show scope global' may emit {} in addr_info.
+        filtered = deepcopy(GUEST)
+        filtered[0]['addr_info'].append({})
+        with self.assertRaisesRegex(ValueError, 'malformed guest address'):
+            DEPLOY['guest_join'](encoded(filtered), RECORD)
+        unfiltered = deepcopy(GUEST)
+        unfiltered[0]['addr_info'].append({'family': 'inet6', 'local': 'fe80::1', 'scope': 'link'})
+        DEPLOY['guest_join'](encoded(unfiltered), RECORD)
+
     def test_extra_missing_ipv4_ipv6_and_malformed_data_stop(self):
         cases = [b'{', b'\xff', encoded({}), encoded([]), encoded([{}]), encoded([None])]
         for index, address in [(0, '10.0.0.6'), (1, '2600:1234::6')]:
@@ -185,7 +195,9 @@ class FinalInvocation(unittest.TestCase):
         fingerprint = 'SHA256:' + base64.b64encode(hashlib.sha256(b'synthetic public host key').digest()).decode().rstrip('=')
         manifest = FINAL | {'mcp_target_ssh_host_key_sha256': fingerprint}
         provider_raw = b'  ' + encoded(RECORD)  # Preserve consumed bytes, not re-serialized JSON.
-        guest_raw = encoded(GUEST)
+        # Unfiltered iproute2 output includes non-global addresses: the join must ignore them.
+        guest_raw = encoded([GUEST[0] | {'addr_info': GUEST[0]['addr_info'] + [
+            {'family': 'inet6', 'local': 'fe80::1', 'scope': 'link'}]}])
         calls = []
         with tempfile.TemporaryDirectory(prefix='final-invocation-') as temporary:
             root = Path(temporary)
@@ -213,7 +225,7 @@ class FinalInvocation(unittest.TestCase):
                         if failure == 'possession':
                             raise subprocess.CalledProcessError(1, command)
                         return subprocess.CompletedProcess(command, 0)
-                    self.assertEqual(command[-1], '/usr/sbin/ip -j addr show scope global')
+                    self.assertEqual(command[-1], '/usr/sbin/ip -j addr show')
                     self.assertEqual(command[1:-1], calls[1][1:-1])
                     if failure == 'guest-command':
                         raise subprocess.CalledProcessError(1, command)
@@ -254,7 +266,7 @@ class FinalInvocation(unittest.TestCase):
                 if failure in ('manifest-hash', 'locator-hash'):
                     self.assertEqual(calls, [])
                 if failure in ('pin', 'possession'):
-                    self.assertFalse(any(command[-1] == '/usr/sbin/ip -j addr show scope global' for command in calls))
+                    self.assertFalse(any(command[-1] == '/usr/sbin/ip -j addr show' for command in calls))
                 return
             evidence = root / 'evidence'
             self.assertEqual((evidence / 'provider-record.json').read_bytes(), provider_raw)
