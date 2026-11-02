@@ -38,12 +38,23 @@ def check_overlay_store(graphroot, device, uid, gid):
                 and st.st_uid == uid and st.st_gid == gid and not st.st_mode & 0o022,
                 'untrusted overlay store ownership, permissions or Data path')
         require(mount_id(overlay) == mount_id(graphroot), 'overlay store crosses a mount boundary')
+        # containers/storage writes "false" when the store is native-overlay
+        # compatible. Only "true" identifies a mount-program store; other
+        # marker contents/types remain fail-closed. Never rewrite the marker.
         try:
-            os.stat('.has-mount-program', dir_fd=overlay, follow_symlinks=False)
+            marker = os.open('.has-mount-program',
+                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                             dir_fd=overlay)
         except FileNotFoundError:
             pass
         else:
-            raise ValueError('STOP: existing overlay store used a mount program; no conversion/repair')
+            try:
+                require(stat.S_ISREG(os.fstat(marker).st_mode),
+                        'STOP: invalid overlay mount-program marker type')
+                require(os.read(marker, 6) == b'false',
+                        'STOP: existing overlay store used a mount program or invalid marker; no conversion/repair')
+            finally:
+                os.close(marker)
     finally:
         os.close(overlay)
 
