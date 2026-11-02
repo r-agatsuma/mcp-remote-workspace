@@ -289,7 +289,7 @@ class OverlayStore(unittest.TestCase):
         overlay = self.graphroot / 'overlay'
         overlay.mkdir(mode=0o700)
         marker = overlay / '.has-mount-program'
-        for contents in [b'', b'true', b'False', b'false\\n', b'falsex', b'unknown']:
+        for contents in [b'', b'true', b'False', b'false\n', b'falsex', b'unknown']:
             with self.subTest(contents=contents):
                 marker.write_bytes(contents)
                 with self.assertRaisesRegex(ValueError, 'STOP: existing overlay store used a mount program'):
