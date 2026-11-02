@@ -256,11 +256,11 @@ class OverlayStore(unittest.TestCase):
         overlay = self.graphroot / 'overlay'
         overlay.mkdir(mode=0o700)
         marker = overlay / '.has-mount-program'
-        marker.write_text('synthetic existing fuse-overlayfs store\n')
+        marker.write_text('true')
         before = marker.stat()
         with self.assertRaisesRegex(ValueError, 'STOP: existing overlay store used a mount program'):
             self.check()
-        self.assertEqual(marker.read_text(), 'synthetic existing fuse-overlayfs store\n')
+        self.assertEqual(marker.read_text(), 'true')
         after = marker.stat()
         self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns),
                          (before.st_ino, before.st_size, before.st_mtime_ns))
@@ -272,6 +272,33 @@ class OverlayStore(unittest.TestCase):
     def test_existing_trusted_overlay_without_marker_is_valid(self):
         (self.graphroot / 'overlay').mkdir(mode=0o700)
         self.check()
+
+    def test_native_overlay_false_marker_is_accepted_without_mutation(self):
+        overlay = self.graphroot / 'overlay'
+        overlay.mkdir(mode=0o700)
+        marker = overlay / '.has-mount-program'
+        marker.write_bytes(b'false')
+        before = marker.stat()
+        self.check()
+        after = marker.stat()
+        self.assertEqual(marker.read_bytes(), b'false')
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns),
+                         (before.st_ino, before.st_size, before.st_mtime_ns))
+
+    def test_invalid_mount_program_marker_or_symlink_fails_closed(self):
+        overlay = self.graphroot / 'overlay'
+        overlay.mkdir(mode=0o700)
+        marker = overlay / '.has-mount-program'
+        for contents in [b'', b'true', b'False', b'false\\n', b'falsex', b'unknown']:
+            with self.subTest(contents=contents):
+                marker.write_bytes(contents)
+                with self.assertRaisesRegex(ValueError, 'STOP: existing overlay store used a mount program'):
+                    self.check()
+                self.assertEqual(marker.read_bytes(), contents)
+        marker.unlink()
+        marker.symlink_to(self.graphroot / 'missing')
+        with self.assertRaises(OSError):
+            self.check()
 
     def test_overlay_symlinks_and_non_directory_rejected(self):
         overlay = self.graphroot / 'overlay'
@@ -412,7 +439,8 @@ class SourceContract(unittest.TestCase):
         self.assertIn('os.fchown(leaf, owner, group)', paths)
         self.assertIn('check_overlay_store(leaf, base.st_dev, uid, gid)', paths)
         self.assertIn("os.open('overlay', flags, dir_fd=graphroot)", paths)
-        self.assertIn("os.stat('.has-mount-program', dir_fd=overlay, follow_symlinks=False)", paths)
+        self.assertIn("os.open('.has-mount-program',", paths)
+        self.assertIn("os.read(marker, 6) == b'false'", paths)
         self.assertIn('st.st_dev == base.st_dev', paths)
 
     def test_no_s3b_host_global_journald_policy(self):
