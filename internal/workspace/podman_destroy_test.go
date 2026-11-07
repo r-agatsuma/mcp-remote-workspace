@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 type destroyRunnerFunc func(context.Context, ...string) ([]byte, error)
@@ -74,7 +75,7 @@ func TestServicePodmanDestroyPreflightReleasesPermitButRetainsGeneration(t *test
 		failure,                                     // Podman.Destroy's read-only preflight, after durable permit acquisition
 		listStep(listJSON(t, o)), inspectStep(t, o), // later Service retry
 		listStep(listJSON(t, o)), inspectStep(t, o), // later Podman preflight
-		commandStep{args: []string{"container", "rm", "--force", "--", o.ID}},
+		commandStep{args: []string{"container", "rm", "--force", "--time=0", "--", o.ID}},
 		listStep("[]"), // independent Podman absence check
 		listStep("[]"), // independent Service absence check
 	)
@@ -127,5 +128,45 @@ func TestServicePodmanDestroyPreflightReleasesPermitButRetainsGeneration(t *test
 	entries, _, _, backend, err = readAdmissionJournal(s.path, s.image)
 	if err != nil || len(entries) != 0 || len(backend.Operations) != 0 {
 		t.Fatal("successful exact retry did not durably finish", backend, err)
+	}
+}
+
+// Even immediate forced stopping must remain bounded by both the adapter and
+// the caller. The CLI deadline is not extended to accommodate StopTimeout.
+type destroyBudgetCLI struct {
+	commandRunner
+	t       *testing.T
+	maximum time.Duration
+}
+
+func (c destroyBudgetCLI) run(ctx context.Context, args ...string) ([]byte, error) {
+	if len(args) > 1 && args[0] == "container" && args[1] == "rm" {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > c.maximum {
+			c.t.Fatalf("removal exceeds deadline budget: %v %v", deadline, ok)
+		}
+	}
+	return c.commandRunner.run(ctx, args...)
+}
+
+func TestDestroyImmediateStopPreservesDeadlineBudget(t *testing.T) {
+	for _, budget := range []time.Duration{5 * time.Second, time.Second} {
+		t.Run(budget.String(), func(t *testing.T) {
+			e := Exact{identity(t, "destroy-budget", "c").Workspace(), Generation(strings.Repeat("b", 64))}
+			o := fakeObject(e)
+			p, _ := podmanStub(t, listStep(listJSON(t, o)), inspectStep(t, o),
+				commandStep{args: []string{"container", "rm", "--force", "--time=0", "--", o.ID}}, listStep("[]"))
+			p.initialized = true
+			p.runner = destroyBudgetCLI{p.runner, t, budget}
+			ctx := context.Background()
+			if budget < 5*time.Second {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, budget)
+				defer cancel()
+			}
+			if err := p.Destroy(ctx, e); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
