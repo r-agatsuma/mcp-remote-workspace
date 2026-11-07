@@ -29,7 +29,7 @@ func (c *pressureCLI) run(ctx context.Context, args ...string) ([]byte, error) {
 	if len(args) > 1 && args[0] == "container" && args[1] == "rm" {
 		c.removes++
 		*c.events = append(*c.events, "remove")
-		if !reflect.DeepEqual(args, []string{"container", "rm", "--force", "--", strings.Repeat("a", 64)}) {
+		if !reflect.DeepEqual(args, []string{"container", "rm", "--force", "--time=0", "--", strings.Repeat("a", 64)}) {
 			c.t.Fatal("non-exact removal", args)
 		}
 		if c.removes == 1 && c.timeout {

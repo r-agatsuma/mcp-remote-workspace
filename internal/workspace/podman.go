@@ -346,9 +346,14 @@ func (p *Podman) Destroy(ctx context.Context, e Exact) (err error) {
 	if lifetime == 0 {
 		lifetime = 5 * time.Second
 	}
+	// Destroy discards the whole generation; no graceful shutdown is required.
+	// Podman otherwise waits its container stop timeout (normally 10s),
+	// outliving this 5s CLI budget for PID 1 workloads such as sleep infinity.
+	// Immediate forced stop leaves the budget for removal, without extending
+	// caller deadlines or treating a timed-out CLI as proof of absence.
 	ordinary, cancel := context.WithTimeout(ctx, lifetime)
 	submitted = true
-	_, removeErr := p.runner.run(ordinary, "container", "rm", "--force", "--", target)
+	_, removeErr := p.runner.run(ordinary, "container", "rm", "--force", "--time=0", "--", target)
 	timedOut := ordinary.Err() == context.DeadlineExceeded
 	cancel()
 	if timedOut {
@@ -368,7 +373,7 @@ func (p *Podman) Destroy(ctx context.Context, e Exact) (err error) {
 			return err
 		}
 		retry, cancel := context.WithTimeout(ctx, lifetime)
-		_, err = p.runner.run(retry, "container", "rm", "--force", "--", target)
+		_, err = p.runner.run(retry, "container", "rm", "--force", "--time=0", "--", target)
 		ended := retry.Err()
 		cancel()
 		if err != nil || ended != nil {
